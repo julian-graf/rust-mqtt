@@ -123,6 +123,7 @@ async fn main() {
         retain: false,
         topic: topic.clone(),
         qos: QoS::ExactlyOnce,
+        message_expiry_interval: Some(0),
     };
 
     let publish_packet_id = match client
@@ -143,6 +144,7 @@ async fn main() {
         retain: false,
         topic: topic.clone(),
         qos: QoS::ExactlyOnce,
+        message_expiry_interval: None,
     };
     client
         .republish(

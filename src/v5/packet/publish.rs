@@ -239,6 +239,10 @@ impl<'p> PublishPacket<'p> {
         p.remaining_length().map(|_| p)
     }
 
+    pub fn set_message_expiry_interval(&mut self, message_expiry_interval: u32) {
+        self.message_expiry_interval = Some(MessageExpiryInterval(message_expiry_interval));
+    }
+
     fn remaining_length(&self) -> Result<VarByteInt, TooLargeToEncode> {
         let variable_header_length = self.topic.written_len()
             + self

@@ -457,13 +457,16 @@ impl<
         };
         let pid = identified_qos.packet_identifier();
 
-        let packet = PublishPacket::new(
+        let mut packet = PublishPacket::new(
             false,
             options.retain,
             identified_qos,
             options.topic.as_ref().as_borrowed(),
             message,
         )?;
+        if let Some(message_expiry_interval) = options.message_expiry_interval {
+            packet.set_message_expiry_interval(message_expiry_interval);
+        }
 
         match pid {
             Some(pid) => debug!("sending PUBLISH packet with packet identifier {}", pid),
@@ -527,13 +530,16 @@ impl<
             }
         };
 
-        let packet = PublishPacket::new(
+        let mut packet = PublishPacket::new(
             true,
             options.retain,
             identified_qos,
             options.topic.as_ref().as_borrowed(),
             message,
         )?;
+        if let Some(message_expiry_interval) = options.message_expiry_interval {
+            packet.set_message_expiry_interval(message_expiry_interval);
+        }
 
         debug!(
             "resending PUBLISH packet with packet identifier {}",
@@ -728,6 +734,9 @@ impl<
                     identified_qos: publish.identified_qos,
                     dup: publish.dup,
                     retain: publish.retain,
+                    message_expiry_interval: publish
+                        .message_expiry_interval
+                        .map(Property::into_inner),
                     topic: publish.topic,
                     message: publish.message,
                 });

@@ -108,6 +108,11 @@ pub struct Publish<'p> {
     /// the retain as published flag of the matching subscription.
     pub retain: bool,
 
+    /// The message expiry interval in seconds.
+    /// This is calculated as follows:
+    /// message_expiry_interval in original published value - waiting time on the server
+    pub message_expiry_interval: Option<u32>,
+
     /// The exact topic of this publication.
     pub topic: MqttString<'p>,
 

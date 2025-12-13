@@ -33,6 +33,7 @@ async fn publish_multiple(
         retain: false,
         topic: topic.clone(),
         qos,
+        message_expiry_interval: None,
     };
 
     let topic_name = topic.as_ref();

@@ -18,4 +18,10 @@ pub struct Options<'p> {
     /// to subscribed clients is the minimum of this value and the quality of service
     /// value of the receiving client's subscription.
     pub qos: QoS,
+
+    /// The message expiry interval in seconds of this application message. After this
+    /// interval has passed, the server cannot publish this message onward to subscribers.
+    /// If set to `None`, the message does not expire and the message expiry interval
+    /// property is omitted on the network.
+    pub message_expiry_interval: Option<u32>,
 }

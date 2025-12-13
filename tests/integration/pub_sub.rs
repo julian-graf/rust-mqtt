@@ -36,6 +36,7 @@ async fn publish_recv_qos0() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::AtMostOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -49,6 +50,7 @@ async fn publish_recv_qos0() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_filter);
@@ -82,6 +84,7 @@ async fn publish_recv_qos1() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -98,6 +101,7 @@ async fn publish_recv_qos1() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_name);
@@ -131,6 +135,7 @@ async fn publish_recv_qos2() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::ExactlyOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -147,6 +152,7 @@ async fn publish_recv_qos2() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_name);
@@ -183,6 +189,7 @@ async fn publish_recv_multiple_qos0() {
             retain: false,
             topic: topic_name1.clone(),
             qos: QoS::AtMostOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -194,6 +201,7 @@ async fn publish_recv_multiple_qos0() {
             retain: false,
             topic: topic_name2.clone(),
             qos: QoS::AtMostOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(2)).await;
@@ -252,6 +260,7 @@ async fn publish_recv_multiple_qos1() {
             retain: false,
             topic: topic_name1.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -263,6 +272,7 @@ async fn publish_recv_multiple_qos1() {
             retain: false,
             topic: topic_name2.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(2)).await;
@@ -327,6 +337,7 @@ async fn publish_recv_multiple_qos2() {
             retain: false,
             topic: topic_name1.clone(),
             qos: QoS::ExactlyOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -338,6 +349,7 @@ async fn publish_recv_multiple_qos2() {
             retain: false,
             topic: topic_name2.clone(),
             qos: QoS::ExactlyOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(2)).await;
@@ -403,6 +415,7 @@ async fn unsub_no_recv() {
             retain: false,
             topic: topic_name1.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(5)).await;
@@ -417,6 +430,7 @@ async fn unsub_no_recv() {
             retain: false,
             topic: topic_name2.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(6)).await;
@@ -473,6 +487,7 @@ async fn recv_min_sub_qos0() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::ExactlyOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -488,6 +503,7 @@ async fn recv_min_sub_qos0() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_name);
@@ -521,6 +537,7 @@ async fn recv_min_sub_qos1() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::ExactlyOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -537,6 +554,7 @@ async fn recv_min_sub_qos1() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_name);
@@ -570,6 +588,7 @@ async fn recv_min_pub_qos0() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::AtMostOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -586,6 +605,7 @@ async fn recv_min_pub_qos0() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_name);
@@ -619,6 +639,7 @@ async fn recv_min_pub_qos1() {
             retain: false,
             topic: topic_name.clone(),
             qos: QoS::AtLeastOnce,
+            message_expiry_interval: None,
         };
 
         sleep(Duration::from_secs(1)).await;
@@ -635,6 +656,7 @@ async fn recv_min_pub_qos1() {
             identified_qos,
             dup,
             retain,
+            message_expiry_interval: _,
             topic: _,
             message,
         } = assert_recv_excl!(rx, topic_filter);

@@ -34,6 +34,7 @@ async fn publish_no_local() {
         retain: false,
         topic: topic_name.clone(),
         qos: QoS::ExactlyOnce,
+        message_expiry_interval: None,
     };
 
     assert_published!(c, pub_options, msg.into());
@@ -73,6 +74,7 @@ async fn subscribe_retain_handling_default() {
         retain: true,
         topic: topic_name.clone(),
         qos: QoS::AtLeastOnce,
+        message_expiry_interval: None,
     };
     assert_published!(tx, pub_options, msg.into());
 
@@ -133,6 +135,7 @@ async fn subscribe_retain_handling_never() {
         retain: true,
         topic: topic_name.clone(),
         qos: QoS::AtLeastOnce,
+        message_expiry_interval: None,
     };
     assert_published!(tx, pub_options, msg.into());
 
@@ -184,6 +187,7 @@ async fn subscribe_retain_handling_clean_only() {
         retain: true,
         topic: topic_name.clone(),
         qos: QoS::AtLeastOnce,
+        message_expiry_interval: None,
     };
     assert_published!(tx, pub_options, msg.into());
 
@@ -230,6 +234,7 @@ async fn subscribe_retain_as_published_false() {
         retain: true,
         topic: topic_name.clone(),
         qos: QoS::AtLeastOnce,
+        message_expiry_interval: None,
     };
     assert_published!(tx, pub_options.clone(), msg.into());
 
@@ -271,6 +276,7 @@ async fn subscribe_retain_as_published_true() {
         retain: true,
         topic: topic_name.clone(),
         qos: QoS::AtLeastOnce,
+        message_expiry_interval: None,
     };
     assert_published!(tx, pub_options.clone(), msg.into());
 
