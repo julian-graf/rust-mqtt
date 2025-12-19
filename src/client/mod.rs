@@ -38,12 +38,50 @@ pub mod raw;
 
 pub use err::Error as MqttError;
 
+macro_rules! Client_impl {
+    { $implementation:tt } => {
+        #[cfg(not(feature="discrete-read"))]
+        impl<
+            'c,
+            N: Transport,
+            const MAX_SUBSCRIBES: usize,
+            const RECEIVE_MAXIMUM: usize,
+            const SEND_MAXIMUM: usize,
+        >
+        Client<
+            'c,
+            N,
+            MAX_SUBSCRIBES,
+            RECEIVE_MAXIMUM,
+            SEND_MAXIMUM
+        > $implementation
+        #[cfg(feature="discrete-read")]
+        impl<
+            'c,
+            N: Transport,
+            B: BufferProvider<'c>,
+            const MAX_SUBSCRIBES: usize,
+            const RECEIVE_MAXIMUM: usize,
+            const SEND_MAXIMUM: usize,
+        >
+        Client<
+            'c,
+            N,
+            B,
+            MAX_SUBSCRIBES,
+            RECEIVE_MAXIMUM,
+            SEND_MAXIMUM
+        > $implementation
+        }
+}
+
+// Skip formatting to keep comma before closing > (see https://github.com/rust-lang/rust/issues/150163)
 /// An MQTT client.
 #[derive(Debug)]
 pub struct Client<
     'c,
     N: Transport,
-    B: BufferProvider<'c>,
+    #[cfg(feature = "discrete-read")] B: BufferProvider<'b>,
     const MAX_SUBSCRIBES: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
@@ -53,6 +91,9 @@ pub struct Client<
     server_config: ServerConfig,
     session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
 
+    #[cfg(not(feature = "discrete-read"))]
+    raw: Raw<'c, N>,
+    #[cfg(feature = "discrete-read")]
     raw: Raw<'c, N, B>,
 
     packet_identifier_counter: u16,
@@ -63,15 +104,7 @@ pub struct Client<
     pending_unsuback: Vec<u16, MAX_SUBSCRIBES>,
 }
 
-impl<
-    'c,
-    N: Transport,
-    B: BufferProvider<'c>,
-    const MAX_SUBSCRIBES: usize,
-    const RECEIVE_MAXIMUM: usize,
-    const SEND_MAXIMUM: usize,
-> Client<'c, N, B, MAX_SUBSCRIBES, RECEIVE_MAXIMUM, SEND_MAXIMUM>
-{
+Client_impl!({
     /// Creates a new, disconnected MQTT client using a buffer provider to store
     /// dynamically sized fields of received packets.
     /// The session state is initialised as a new session. If you want to start the
@@ -94,6 +127,19 @@ impl<
 
     /// Creates a new, disconnected MQTT client using a buffer provider to store
     /// dynamically sized fields of received packets.
+    #[cfg(not(feature = "discrete-read"))]
+    pub fn with_session(
+        session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+        buffer: &'c mut [u8],
+    ) -> Self {
+        let mut s = Self::new(buffer);
+        s.session = session;
+        s
+    }
+
+    /// Creates a new, disconnected MQTT client using a buffer provider to store
+    /// dynamically sized fields of received packets.
+    #[cfg(feature = "discrete-read")]
     pub fn with_session(
         session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
         buffer: &'c mut B,
@@ -143,6 +189,7 @@ impl<
     /// Returns a mutable reference to the supplied `BufferProvider` implementation.
     ///
     /// This can for example be used to reset the underlying buffer if using `BumpBuffer`.
+    #[cfg(feature = "discrete-read")]
     #[inline]
     pub fn buffer(&mut self) -> &mut B {
         self.raw.buffer()
@@ -971,4 +1018,4 @@ impl<
 
         Ok(event)
     }
-}
+});

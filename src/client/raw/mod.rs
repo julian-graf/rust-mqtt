@@ -4,7 +4,7 @@ mod err;
 mod header;
 mod net;
 
-use core::marker::PhantomData;
+use core::convert::Infallible;
 
 pub use err::Error as RawError;
 pub use net::Error as NetStateError;
@@ -12,7 +12,7 @@ pub use net::Error as NetStateError;
 use crate::{
     buffer::BufferProvider,
     client::raw::{header::HeaderState, net::NetState},
-    eio::{Error, ErrorKind},
+    eio::{self, ErrorKind},
     fmt::{debug_assert, panic, unreachable},
     header::FixedHeader,
     io::{err::WriteError, net::Transport, read::BodyReader},
@@ -21,25 +21,56 @@ use crate::{
     v5::packet::DisconnectPacket,
 };
 
-/// An MQTT Client offering a low level api for sending and receiving packets
-#[derive(Debug)]
-pub(crate) struct Raw<'b, N: Transport, B: BufferProvider<'b>> {
-    n: NetState<N>,
-    buf: &'b mut B,
-    header: HeaderState,
-    _b: PhantomData<&'b ()>,
+#[cfg(feature = "discrete-read")]
+type Error = RawError<B::BufferProvider>;
+#[cfg(not(feature = "discrete-read"))]
+type Error = RawError<Infallible>;
+
+macro_rules! Raw_impl {
+    { $implementation:tt } => {
+        #[cfg(not(feature="discrete-read"))]
+        impl<'b, N: Transport> Raw<'b, N> $implementation
+
+        #[cfg(feature="discrete-read")]
+        impl<'b, N: Transport, B: BufferProvider<'b>> Raw<T> $implementation
+    }
 }
 
+// Skip formatting to keep comma before closing > (see https://github.com/rust-lang/rust/issues/150163)
+/// An MQTT Client offering a low level api for sending and receiving packets
+#[derive(Debug)]
+#[rustfmt::skip]
+pub(crate) struct Raw<'b, N: Transport, #[cfg(feature = "discrete-read")] B: BufferProvider<'b>,> {
+    n: NetState<N>,
+    #[cfg(not(feature = "discrete-read"))]
+    buf: &'b mut [u8],
+    #[cfg(feature = "discrete-read")]
+    buf: &'b mut B,
+    header: HeaderState,
+}
+
+#[cfg(not(feature = "discrete-read"))]
+impl<'b, N: Transport> Raw<'b, N> {
+    pub fn new_disconnected(buf: &'b mut [u8]) -> Self {
+        Self {
+            n: NetState::Terminated,
+            buf,
+            header: HeaderState::new(),
+        }
+    }
+}
+#[cfg(feature = "discrete-read")]
 impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
     pub fn new_disconnected(buf: &'b mut B) -> Self {
         Self {
             n: NetState::Terminated,
             buf,
             header: HeaderState::new(),
-            _b: PhantomData,
         }
     }
+}
 
+Raw_impl!({
     pub fn set_net(&mut self, net: N) {
         debug_assert!(
             !self.n.is_ok(),
@@ -48,6 +79,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
         self.n.replace(net);
     }
 
+    #[cfg(feature = "discrete-read")]
     pub fn buffer(&mut self) -> &mut B {
         self.buf
     }
@@ -64,7 +96,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
     /// Disconnect handler after an error occured.
     ///
     /// This expects the network to not be in Ok() state
-    pub async fn abort(&mut self) -> Result<(), RawError<B::ProvisionError>> {
+    pub async fn abort(&mut self) -> Result<(), Error> {
         debug_assert!(
             !self.n.is_ok(),
             "Network must not be in Ok() state to disconnect due to an error."
@@ -78,7 +110,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
                 let packet = DisconnectPacket::new(r);
 
                 packet.send(n).await.map_err(|e| match e {
-                    TxError::Write(e) => RawError::Network(Error::kind(&e)),
+                    TxError::Write(e) => RawError::Network(eio::Error::kind(&e)),
                     TxError::WriteZero => RawError::Network(ErrorKind::WriteZero),
                     TxError::RemainingLenExceeded => panic!("DISCONNECT never exceeds max length"),
                 })
@@ -90,10 +122,10 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
         }
     }
 
-    fn handle_rx<E: Into<(RawError<B::ProvisionError>, Option<ReasonCode>)>>(
+    fn handle_rx<E: Into<(RawError<B::BufferProvider>, Option<ReasonCode>)>>(
         &mut self,
         e: E,
-    ) -> RawError<B::ProvisionError> {
+    ) -> RawError<B::BufferProvider> {
         let (e, r) = e.into();
 
         match r {
@@ -105,10 +137,10 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
 
         e
     }
-    fn handle_tx<E: Into<RawError<B::ProvisionError>>>(
+    fn handle_tx<E: Into<Error>>(
         &mut self,
         e: E,
-    ) -> RawError<B::ProvisionError> {
+    ) -> Error {
         // Terminate right away because if send fails, sending another (DISCONNECT) packet doesn't make sense
         self.n.terminate();
 
@@ -116,7 +148,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
     }
 
     /// Cancel-safe method to receive the fixed header of a packet
-    pub async fn recv_header(&mut self) -> Result<FixedHeader, RawError<B::ProvisionError>> {
+    pub async fn recv_header(&mut self) -> Result<FixedHeader, Error> {
         let net = self.n.get()?;
 
         loop {
@@ -138,7 +170,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
     pub async fn recv_body<P: RxPacket<'b>>(
         &mut self,
         header: &FixedHeader,
-    ) -> Result<P, RawError<B::ProvisionError>> {
+    ) -> Result<P, Error> {
         let net = self.n.get()?;
         let reader = BodyReader::new(net, self.buf, header.remaining_len.size());
 
@@ -147,38 +179,24 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
             .map_err(|e| self.handle_rx(e))
     }
 
-    // pub async fn recv_full<P: RxPacket<'b>>(&mut self) -> Result<P, RawError<B::ProvisionError>> {
-    //     let header = self.recv_header().await?;
-    //     let packet_type = header.packet_type().map_err(|_r| {
-    //         self.close_with(Some(ReasonCode::MalformedPacket));
-    //         RawError::Server
-    //     })?;
-    //     if packet_type != P::PACKET_TYPE {
-    //         self.close_with(Some(ReasonCode::ImplementationSpecificError));
-    //         return Err(RawError::UnexpectedPacketType);
-    //     }
-
-    //     self.recv_body(&header).await
-    // }
-
     pub async fn send<P: TxPacket>(
         &mut self,
         packet: &P,
-    ) -> Result<(), RawError<B::ProvisionError>> {
+    ) -> Result<(), Error> {
         let net = self.n.get()?;
 
         packet.send(net).await.map_err(|e| self.handle_tx(e))
     }
 
     /// Cancel-safe if N::flush() is cancel-safe
-    pub async fn flush(&mut self) -> Result<(), RawError<B::ProvisionError>> {
+    pub async fn flush(&mut self) -> Result<(), Error> {
         self.n.get()?.flush().await.map_err(|e| {
             let e: WriteError<_> = e.into();
             let e: TxError<_> = e.into();
             self.handle_tx(e)
         })
     }
-}
+});
 
 #[cfg(test)]
 mod unit {

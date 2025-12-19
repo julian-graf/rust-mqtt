@@ -51,6 +51,8 @@ alloc = []
 v3 = []
 v5 = []
 
+discrete-read = []
+
 
 [[example]]
 name = "demo"
