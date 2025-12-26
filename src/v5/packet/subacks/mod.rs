@@ -3,13 +3,11 @@ use core::marker::PhantomData;
 use heapless::Vec;
 
 use crate::{
-    buffer::BufferProvider,
     eio::Read,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
-        write::{Writable, wlen},
+        read::Readable, reader::PacketDecoder, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket},
     types::{ReasonCode, VarByteInt},
@@ -44,10 +42,10 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> Packet
 impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> RxPacket<'p>
     for GenericSubackPacket<'static, T, MAX_TOPIC_FILTERS>
 {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    fn receive(
         header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+        mut reader: PacketDecoder<'p>,
+    ) -> Result<Self, RxError> {
         trace!("decoding");
 
         if header.flags() != 0 {
@@ -57,10 +55,10 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> RxPacket<'p>
         let r = &mut reader;
 
         trace!("reading packet identifier");
-        let packet_identifier = u16::read(r).await?;
+        let packet_identifier = u16::read(r)?;
 
         trace!("reading properties length");
-        let mut properties_length = VarByteInt::read(r).await?.size();
+        let mut properties_length = VarByteInt::read(r)?.size();
 
         trace!("properties length = {}", properties_length);
 
@@ -78,7 +76,7 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> RxPacket<'p>
                 "reading property type with remaining len = {}",
                 r.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(r)?;
 
             trace!(
                 "reading property body of {:?} with remaining len = {}",
@@ -96,18 +94,18 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> RxPacket<'p>
                 PropertyType::ReasonString => {
                     properties_length = properties_length.checked_sub(1).ok_or(RxError::MalformedPacket)?;
                     seen_reason_string = true;
-                    let len = u16::read(r).await? as usize;
+                    let len = u16::read(r)? as usize;
                     trace!("Skipping reason string of length {}", len);
-                    r.skip(len).await?;
+                    r.skip(len)?;
                     properties_length = properties_length.checked_sub(wlen!(u16) + len).ok_or(RxError::MalformedPacket)?;
                 },
                 PropertyType::UserProperty => {
                     properties_length = properties_length.checked_sub(1).ok_or(RxError::MalformedPacket)?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
                     properties_length = properties_length.checked_sub(wlen!(u16) + len).ok_or(RxError::MalformedPacket)?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
                     properties_length = properties_length.checked_sub(wlen!(u16) + len).ok_or(RxError::MalformedPacket)?;
                 },
                 p => {
@@ -123,7 +121,7 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize> RxPacket<'p>
         let mut reason_codes = Vec::new();
         while r.remaining_len() > 0 {
             trace!("reading reason code");
-            let reason_code = ReasonCode::read(r).await?;
+            let reason_code = ReasonCode::read(r)?;
 
             if !T::reason_code_allowed(reason_code) {
                 error!("invalid reason code: {:?}", reason_code);

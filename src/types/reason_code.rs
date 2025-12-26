@@ -1,8 +1,9 @@
 use crate::{
     eio::{Read, Write},
     io::{
-        err::{ReadError, WriteError},
+        err::{DecodeError, WriteError},
         read::Readable,
+        reader::PacketDecoder,
         write::Writable,
     },
 };
@@ -211,9 +212,9 @@ impl ReasonCode {
     }
 }
 
-impl<R: Read> Readable<R> for ReasonCode {
-    async fn read(net: &mut R) -> Result<Self, ReadError<R::Error>> {
-        let value = u8::read(net).await?;
+impl<'r> Readable<'r> for ReasonCode {
+    fn read(net: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let value = u8::read(net)?;
         Ok(match value {
             0x00 => Self::Success, // Note: This is ambiguous - context determines the specific variant
             0x01 => Self::GrantedQoS1,
@@ -258,7 +259,7 @@ impl<R: Read> Readable<R> for ReasonCode {
             0xA0 => Self::MaximumConnectTime,
             0xA1 => Self::SubscriptionIdentifiersNotSupported,
             0xA2 => Self::WildcardSubscriptionsNotSupported,
-            _ => return Err(ReadError::ProtocolError),
+            _ => return Err(DecodeError::ProtocolError),
         })
     }
 }

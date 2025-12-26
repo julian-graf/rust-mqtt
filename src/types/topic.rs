@@ -29,12 +29,6 @@ impl<'t> TopicName<'t> {
     pub unsafe fn new_unchecked(topic: MqttString<'t>) -> Self {
         Self(topic)
     }
-
-    /// Delegates to `Bytes::as_borrowed()`.
-    #[inline]
-    pub fn as_borrowed(&'t self) -> Self {
-        Self(self.as_ref().as_borrowed())
-    }
 }
 
 impl<'t> AsRef<MqttString<'t>> for TopicName<'t> {
@@ -65,12 +59,6 @@ impl<'t> TopicFilter<'t> {
     /// The syntax of the topic filter is valid.
     pub unsafe fn new_unchecked(topic: MqttString<'t>) -> Self {
         Self(topic)
-    }
-
-    /// Delegates to `Bytes::as_borrowed()`.
-    #[inline]
-    pub fn as_borrowed(&'t self) -> Self {
-        Self(self.as_ref().as_borrowed())
     }
 }
 

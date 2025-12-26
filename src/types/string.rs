@@ -3,10 +3,7 @@ use core::{
     str::{Utf8Error, from_utf8, from_utf8_unchecked},
 };
 
-use crate::{
-    Bytes,
-    types::{MqttBinary, TooLargeToEncode},
-};
+use crate::types::{MqttBinary, TooLargeToEncode};
 
 /// Arbitrary UTF-8 encoded string with a length in bytes less than or equal to `Self::MAX_LENGTH`
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -55,14 +52,6 @@ impl<'s> MqttString<'s> {
     pub const MAX_LENGTH: usize = MqttBinary::MAX_LENGTH;
 
     /// Creates an MQTT string and checks for the max length in bytes of `Self::MAX_LENGTH`.
-    ///
-    /// # Important
-    /// Does not check that the data is valid UTF-8!
-    pub fn new(bytes: Bytes<'s>) -> Result<Self, TooLargeToEncode> {
-        Ok(Self(MqttBinary::new(bytes)?))
-    }
-
-    /// Creates an MQTT string and checks for the max length in bytes of `Self::MAX_LENGTH`.
     pub const fn from_slice(slice: &'s str) -> Result<Self, TooLargeToEncode> {
         match slice.len() {
             // Safety: The length of the slice parameter in bytes is less than or equal to `Self::MAX_LENGTH`.
@@ -71,15 +60,6 @@ impl<'s> MqttString<'s> {
             })),
             _ => Err(TooLargeToEncode),
         }
-    }
-
-    /// Creates an MQTT string without checking for the max length in bytes of `Self::MAX_LENGTH`.
-    ///
-    /// # Safety
-    /// The length of the slice parameter in bytes is less than or equal to `Self::MAX_LENGTH`.
-    pub unsafe fn new_unchecked(bytes: Bytes<'s>) -> Self {
-        // Safety: The length of the slice parameter in bytes is less than or equal to `Self::MAX_LENGTH`.
-        Self(unsafe { MqttBinary::new_unchecked(bytes) })
     }
 
     /// Creates an MQTT string without checking for the max length in bytes of `Self::MAX_LENGTH`.
@@ -101,11 +81,5 @@ impl<'s> MqttString<'s> {
     #[inline]
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    /// Delegates to `Bytes::as_borrowed()`.
-    #[inline]
-    pub fn as_borrowed(&'s self) -> Self {
-        Self(self.0.as_borrowed())
     }
 }

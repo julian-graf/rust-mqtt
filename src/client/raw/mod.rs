@@ -4,84 +4,51 @@ mod err;
 mod header;
 mod net;
 
-use core::convert::Infallible;
-
 pub use err::Error as RawError;
 pub use net::Error as NetStateError;
 
 use crate::{
-    buffer::BufferProvider,
     client::raw::{header::HeaderState, net::NetState},
     eio::{self, ErrorKind},
     fmt::{debug_assert, panic, unreachable},
     header::FixedHeader,
-    io::{err::WriteError, net::Transport, read::BodyReader},
+    io::{
+        err::WriteError,
+        net::Transport,
+        reader::{PacketDecoder, PacketReceiver},
+    },
     packet::{RxError, RxPacket, TxError, TxPacket},
     types::ReasonCode,
     v5::packet::DisconnectPacket,
 };
 
-#[cfg(feature = "discrete-read")]
-type Error = RawError<B::BufferProvider>;
-#[cfg(not(feature = "discrete-read"))]
-type Error = RawError<Infallible>;
-
-macro_rules! Raw_impl {
-    { $implementation:tt } => {
-        #[cfg(not(feature="discrete-read"))]
-        impl<'b, N: Transport> Raw<'b, N> $implementation
-
-        #[cfg(feature="discrete-read")]
-        impl<'b, N: Transport, B: BufferProvider<'b>> Raw<T> $implementation
-    }
-}
-
 // Skip formatting to keep comma before closing > (see https://github.com/rust-lang/rust/issues/150163)
 /// An MQTT Client offering a low level api for sending and receiving packets
 #[derive(Debug)]
-#[rustfmt::skip]
-pub(crate) struct Raw<'b, N: Transport, #[cfg(feature = "discrete-read")] B: BufferProvider<'b>,> {
+pub(crate) struct Raw<'b, N: Transport> {
     n: NetState<N>,
-    #[cfg(not(feature = "discrete-read"))]
-    buf: &'b mut [u8],
-    #[cfg(feature = "discrete-read")]
-    buf: &'b mut B,
-    header: HeaderState,
+    receiver: PacketReceiver<'b>,
 }
 
-#[cfg(not(feature = "discrete-read"))]
 impl<'b, N: Transport> Raw<'b, N> {
+    /// `buf.len()` must be greater or equal to 5 to allow safe operation
     pub fn new_disconnected(buf: &'b mut [u8]) -> Self {
+        debug_assert!(buf.len() >= 5);
+
         Self {
             n: NetState::Terminated,
-            buf,
-            header: HeaderState::new(),
-        }
-    }
-}
-#[cfg(feature = "discrete-read")]
-impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
-    pub fn new_disconnected(buf: &'b mut B) -> Self {
-        Self {
-            n: NetState::Terminated,
-            buf,
-            header: HeaderState::new(),
+            receiver: PacketReceiver::new(buf),
         }
     }
 }
 
-Raw_impl!({
+impl<'b, N: Transport> Raw<'b, N> {
     pub fn set_net(&mut self, net: N) {
         debug_assert!(
             !self.n.is_ok(),
             "Network must not be in Ok() state to replace it."
         );
         self.n.replace(net);
-    }
-
-    #[cfg(feature = "discrete-read")]
-    pub fn buffer(&mut self) -> &mut B {
-        self.buf
     }
 
     pub fn close_with(&mut self, reason_code: Option<ReasonCode>) {
@@ -96,7 +63,7 @@ Raw_impl!({
     /// Disconnect handler after an error occured.
     ///
     /// This expects the network to not be in Ok() state
-    pub async fn abort(&mut self) -> Result<(), Error> {
+    pub async fn abort(&mut self) -> Result<(), RawError> {
         debug_assert!(
             !self.n.is_ok(),
             "Network must not be in Ok() state to disconnect due to an error."
@@ -122,10 +89,7 @@ Raw_impl!({
         }
     }
 
-    fn handle_rx<E: Into<(RawError<B::BufferProvider>, Option<ReasonCode>)>>(
-        &mut self,
-        e: E,
-    ) -> RawError<B::BufferProvider> {
+    fn handle_rx<E: Into<(RawError, Option<ReasonCode>)>>(&mut self, e: E) -> RawError {
         let (e, r) = e.into();
 
         match r {
@@ -137,40 +101,33 @@ Raw_impl!({
 
         e
     }
-    fn handle_tx<E: Into<Error>>(
-        &mut self,
-        e: E,
-    ) -> Error {
+    fn handle_tx<E: Into<RawError>>(&mut self, e: E) -> RawError {
         // Terminate right away because if send fails, sending another (DISCONNECT) packet doesn't make sense
         self.n.terminate();
 
         e.into()
     }
 
-    /// Cancel-safe method to receive the fixed header of a packet
-    pub async fn recv_header(&mut self) -> Result<FixedHeader, Error> {
+    /// Cancel-safe method to receive a packet
+    pub async fn recv<'r>(&'r mut self) -> Result<PacketDecoder<'r>, RawError> {
         let net = self.n.get()?;
 
-        loop {
-            match self.header.update(net).await {
-                Ok(None) => {}
-                Ok(Some(h)) => return Ok(h),
-                Err(e) => {
-                    let e: RxError<_, _> = e.into();
-                    return Err(self.handle_rx(e));
-                }
-            }
+        match self.receiver.poll(net).await {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                let e = e.clone();
+                Err(self.handle_rx(e))
+            },
         }
     }
+
+    pub fn decode<P: RxPacket<'b>>(&mut self) {}
 
     /// Not cancel-safe
     ///
     /// Does not perform a check on headers packet type
     /// => Assumes you call this only for correct packet headers
-    pub async fn recv_body<P: RxPacket<'b>>(
-        &mut self,
-        header: &FixedHeader,
-    ) -> Result<P, Error> {
+    pub async fn recv_body<P: RxPacket<'b>>(&mut self, header: &FixedHeader) -> Result<P, Error> {
         let net = self.n.get()?;
         let reader = BodyReader::new(net, self.buf, header.remaining_len.size());
 
@@ -179,10 +136,7 @@ Raw_impl!({
             .map_err(|e| self.handle_rx(e))
     }
 
-    pub async fn send<P: TxPacket>(
-        &mut self,
-        packet: &P,
-    ) -> Result<(), Error> {
+    pub async fn send<P: TxPacket>(&mut self, packet: &P) -> Result<(), Error> {
         let net = self.n.get()?;
 
         packet.send(net).await.map_err(|e| self.handle_tx(e))
@@ -196,7 +150,7 @@ Raw_impl!({
             self.handle_tx(e)
         })
     }
-});
+}
 
 #[cfg(test)]
 mod unit {

@@ -1,9 +1,10 @@
 use crate::{
-    eio::{Read, Write},
+    eio::{ Write},
     fmt::unreachable,
     io::{
-        err::{ReadError, WriteError},
+        err::{DecodeError, WriteError},
         read::Readable,
+        reader::PacketDecoder,
         write::Writable,
     },
     types::TooLargeToEncode,
@@ -14,17 +15,17 @@ use crate::{
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct VarByteInt(u32);
 
-impl<R: Read> Readable<R> for VarByteInt {
-    async fn read(net: &mut R) -> Result<Self, ReadError<R::Error>> {
+impl<'r> Readable<'r> for VarByteInt {
+    fn read(net: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
         let mut multiplier = 1;
         let mut value = 0;
 
         loop {
-            let byte = u8::read(net).await?;
+            let byte = u8::read(net)?;
 
             value += (byte & 0x7F) as u32 * multiplier;
             if multiplier > 128 * 128 * 128 {
-                return Err(ReadError::MalformedPacket);
+                return Err(DecodeError::MalformedPacket);
             }
             multiplier *= 128;
             if byte & 128 == 0 {

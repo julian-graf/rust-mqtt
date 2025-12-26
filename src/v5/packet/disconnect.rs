@@ -1,14 +1,12 @@
 #[cfg(test)]
 use crate::types::MqttString;
 use crate::{
-    buffer::BufferProvider,
     config::SessionExpiryInterval,
     eio::{Read, Write},
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
-        write::{Writable, wlen},
+        read::Readable, reader::PacketDecoder, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::{ReasonCode, VarByteInt},
@@ -30,10 +28,10 @@ impl<'p> Packet for DisconnectPacket<'p> {
     const PACKET_TYPE: PacketType = PacketType::Disconnect;
 }
 impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    fn receive(
         header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+        mut reader: PacketDecoder<'p>,
+    ) -> Result<Self, RxError> {
         trace!("decoding");
 
         if header.flags() != 0 {
@@ -48,7 +46,7 @@ impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
             ReasonCode::Success
         } else {
             trace!("reading disconnect reason code");
-            ReasonCode::read(r).await?
+            ReasonCode::read(r)?
         };
 
         if !matches!(
@@ -100,7 +98,7 @@ impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
             0
         } else {
             trace!("reading properties length");
-            VarByteInt::read(r).await?.size()
+            VarByteInt::read(r)?.size()
         };
 
         trace!("properties length = {}", properties_length);
@@ -115,7 +113,7 @@ impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
                 "reading property type with remaining len = {}",
                 r.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(r)?;
 
             trace!(
                 "reading property body of {:?} with remaining len = {}",
@@ -124,13 +122,13 @@ impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
             );
             #[rustfmt::skip]
             match property_type {
-                PropertyType::ReasonString => packet.reason_string.try_set(r).await?,
-                PropertyType::ServerReference => packet.server_reference.try_set(r).await?,
+                PropertyType::ReasonString => packet.reason_string.try_set(r)?,
+                PropertyType::ServerReference => packet.server_reference.try_set(r)?,
                 PropertyType::UserProperty => {
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
                 },
                 // Protocol error according to [MQTT-3.14.2-2]
                 PropertyType::SessionExpiryInterval => return Err(RxError::ProtocolError),
