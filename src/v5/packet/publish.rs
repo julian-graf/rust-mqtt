@@ -1,11 +1,10 @@
 use crate::{
-    buffer::BufferProvider,
-    bytes::Bytes,
-    eio::{Read, Write},
+    eio::Write,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable, Store},
+        read::Readable,
+        reader::PacketDecoder,
         write::{Writable, wlen},
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
@@ -36,45 +35,42 @@ pub struct PublishPacket<'p> {
     pub correlation_data: Option<CorrelationData<'p>>,
     // TODO subscription identifiers
     pub content_type: Option<ContentType<'p>>,
-    pub message: Bytes<'p>,
+    pub message: &'p [u8],
 }
 
 impl<'p> Packet for PublishPacket<'p> {
     const PACKET_TYPE: PacketType = PacketType::Publish;
 }
 impl<'p> RxPacket<'p> for PublishPacket<'p> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
-        header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+    fn decode(mut decoder: PacketDecoder<'p>) -> Result<Self, RxError> {
         trace!("decoding");
 
-        let flags = header.flags();
+        let flags = decoder.header().flags();
 
         trace!("decoding flags");
         let dup = flags >> 3 == 1;
         let qos = QoS::try_from_bits((flags >> 1) & 0x03).map_err(|_| RxError::MalformedPacket)?;
         let retain = flags & 0x01 == 1;
 
-        let r = &mut reader;
+        let d = &mut decoder;
 
         trace!("reading topic name");
-        let topic_name = MqttString::read(r).await?;
+        let topic_name = MqttString::read(d)?;
 
         let identified_qos = match qos {
             QoS::AtMostOnce => IdentifiedQoS::AtMostOnce,
             QoS::AtLeastOnce => {
                 trace!("reading packet identifier");
-                IdentifiedQoS::AtLeastOnce(u16::read(r).await?)
+                IdentifiedQoS::AtLeastOnce(u16::read(d)?)
             }
             QoS::ExactlyOnce => {
                 trace!("reading packet identifier");
-                IdentifiedQoS::ExactlyOnce(u16::read(r).await?)
+                IdentifiedQoS::ExactlyOnce(u16::read(d)?)
             }
         };
 
         trace!("reading properties length");
-        let mut properties_length = VarByteInt::read(r).await?.size();
+        let mut properties_length = VarByteInt::read(d)?.size();
         trace!("properties length = {}", properties_length);
 
         let mut payload_format_indicator: Option<PayloadFormatIndicator> = None;
@@ -87,9 +83,9 @@ impl<'p> RxPacket<'p> for PublishPacket<'p> {
         while properties_length > 0 {
             trace!(
                 "reading property type with remaining len = {}",
-                r.remaining_len()
+                d.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(d)?;
             properties_length = properties_length
                 .checked_sub(property_type.written_len())
                 .ok_or(RxError::MalformedPacket)?;
@@ -97,58 +93,58 @@ impl<'p> RxPacket<'p> for PublishPacket<'p> {
             trace!(
                 "reading property body of {:?} with remaining len = {}",
                 property_type,
-                r.remaining_len()
+                d.remaining_len()
             );
             match property_type {
                 PropertyType::PayloadFormatIndicator => {
-                    payload_format_indicator.try_set(r).await?;
+                    payload_format_indicator.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(payload_format_indicator.unwrap().into_inner().written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::MessageExpiryInterval => {
-                    message_expiry_interval.try_set(r).await?;
+                    message_expiry_interval.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(message_expiry_interval.unwrap().into_inner().written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::TopicAlias => {
-                    topic_alias.try_set(r).await?;
+                    topic_alias.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(topic_alias.unwrap().into_inner().written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::ResponseTopic => {
-                    response_topic.try_set(r).await?;
+                    response_topic.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(response_topic.as_ref().unwrap().0.written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::CorrelationData => {
-                    correlation_data.try_set(r).await?;
+                    correlation_data.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(correlation_data.as_ref().unwrap().0.written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 #[rustfmt::skip]
                 PropertyType::UserProperty => {
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
                     properties_length = properties_length.checked_sub(wlen!(u16) + len).ok_or(RxError::MalformedPacket)?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
                     properties_length = properties_length.checked_sub(wlen!(u16) + len).ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::SubscriptionIdentifier => {
                     // Since multiple subscription identifiers can appear, we just parse it into the void for now
                     let mut subscription_identifier: Option<SubscriptionIdentifier> = None;
-                    subscription_identifier.try_set(r).await?;
+                    subscription_identifier.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(subscription_identifier.unwrap().into_inner().written_len())
                         .ok_or(RxError::MalformedPacket)?;
                 }
                 PropertyType::ContentType => {
-                    content_type.try_set(r).await?;
+                    content_type.try_set(d)?;
                     properties_length = properties_length
                         .checked_sub(content_type.as_ref().unwrap().0.written_len())
                         .ok_or(RxError::MalformedPacket)?;
@@ -161,11 +157,11 @@ impl<'p> RxPacket<'p> for PublishPacket<'p> {
             };
         }
 
-        let message_len = r.remaining_len();
+        let message_len = d.remaining_len();
 
         trace!("reading message ({} bytes)", message_len);
 
-        let payload = r.read_and_store(r.remaining_len()).await?;
+        let payload = d.take_bytes(d.remaining_len())?;
 
         Ok(PublishPacket {
             dup,
@@ -220,7 +216,7 @@ impl<'p> PublishPacket<'p> {
         retain: bool,
         identified_qos: IdentifiedQoS,
         topic: MqttString<'p>,
-        message: Bytes<'p>,
+        message: &'p [u8],
     ) -> Result<Self, TooLargeToEncode> {
         let p = Self {
             dup,
@@ -279,7 +275,6 @@ impl<'p> PublishPacket<'p> {
 #[cfg(test)]
 mod unit {
     use crate::{
-        bytes::Bytes,
         test::{rx::decode, tx::encode},
         types::{IdentifiedQoS, MqttBinary, MqttString},
         v5::{

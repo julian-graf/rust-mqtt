@@ -1,42 +1,60 @@
 //! Implements primitives for handling connections along with sending and receiving packets.
 
 mod err;
-mod header;
 mod net;
 
-use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut};
 
+use embedded_io_async::Error;
 pub use err::Error as RawError;
 pub use net::Error as NetStateError;
 
 use crate::{
-    buffer::BufferProvider,
-    client::raw::{header::HeaderState, net::NetState},
-    eio::{Error, ErrorKind},
+    client::raw::net::NetState,
+    eio::{self, ErrorKind},
     fmt::{debug_assert, panic, unreachable},
-    header::FixedHeader,
-    io::{err::WriteError, net::Transport, read::BodyReader},
-    packet::{RxError, RxPacket, TxError, TxPacket},
+    io::{
+        err::WriteError,
+        net::Transport,
+        reader::{PacketDecodeToken, PacketDecoder, PacketReceiver},
+    },
+    packet::{RxPacket, TxError, TxPacket},
     types::ReasonCode,
     v5::packet::DisconnectPacket,
 };
 
+// Skip formatting to keep comma before closing > (see https://github.com/rust-lang/rust/issues/150163)
 /// An MQTT Client offering a low level api for sending and receiving packets
 #[derive(Debug)]
-pub(crate) struct Raw<'b, N: Transport, B: BufferProvider<'b>> {
+pub struct Raw<'b, N: Transport> {
     n: NetState<N>,
-    buf: &'b mut B,
-    header: HeaderState,
-    _b: PhantomData<&'b ()>,
+    receiver: PacketReceiver<'b>,
 }
 
-impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
-    pub fn new_disconnected(buf: &'b mut B) -> Self {
+pub struct RawHandle<'h, N: Transport> {
+    n: &'h mut NetState<N>,
+}
+impl<'h, N: Transport> Deref for RawHandle<'h, N> {
+    type Target = NetState<N>;
+
+    fn deref(&self) -> &Self::Target {
+        self.n
+    }
+}
+impl<'h, N: Transport> DerefMut for RawHandle<'h, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.n
+    }
+}
+
+impl<'b, N: Transport> Raw<'b, N> {
+    /// `buf.len()` must be greater or equal to 5 to allow safe operation
+    pub fn new_disconnected(rx_buffer: &'b mut [u8]) -> Self {
+        debug_assert!(rx_buffer.len() >= 5);
+
         Self {
             n: NetState::Terminated,
-            buf,
-            header: HeaderState::new(),
-            _b: PhantomData,
+            receiver: PacketReceiver::new(rx_buffer),
         }
     }
 
@@ -48,23 +66,14 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
         self.n.replace(net);
     }
 
-    pub fn buffer(&mut self) -> &mut B {
-        self.buf
-    }
-
     pub fn close_with(&mut self, reason_code: Option<ReasonCode>) {
-        match reason_code {
-            Some(r) => self.n.fail(r),
-            None => {
-                self.n.terminate();
-            }
-        }
+        self.n.close_with(reason_code);
     }
 
     /// Disconnect handler after an error occured.
     ///
     /// This expects the network to not be in Ok() state
-    pub async fn abort(&mut self) -> Result<(), RawError<B::ProvisionError>> {
+    pub async fn abort(&mut self) -> Result<(), RawError> {
         debug_assert!(
             !self.n.is_ok(),
             "Network must not be in Ok() state to disconnect due to an error."
@@ -78,7 +87,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
                 let packet = DisconnectPacket::new(r);
 
                 packet.send(n).await.map_err(|e| match e {
-                    TxError::Write(e) => RawError::Network(Error::kind(&e)),
+                    TxError::Write(e) => RawError::Network(eio::Error::kind(&e)),
                     TxError::WriteZero => RawError::Network(ErrorKind::WriteZero),
                     TxError::RemainingLenExceeded => panic!("DISCONNECT never exceeds max length"),
                 })
@@ -90,93 +99,39 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
         }
     }
 
-    fn handle_rx<E: Into<(RawError<B::ProvisionError>, Option<ReasonCode>)>>(
-        &mut self,
-        e: E,
-    ) -> RawError<B::ProvisionError> {
-        let (e, r) = e.into();
-
-        match r {
-            Some(r) => self.n.fail(r),
-            None => {
-                self.n.terminate();
-            }
-        }
-
-        e
-    }
-    fn handle_tx<E: Into<RawError<B::ProvisionError>>>(
-        &mut self,
-        e: E,
-    ) -> RawError<B::ProvisionError> {
-        // Terminate right away because if send fails, sending another (DISCONNECT) packet doesn't make sense
-        self.n.terminate();
-
-        e.into()
-    }
-
-    /// Cancel-safe method to receive the fixed header of a packet
-    pub async fn recv_header(&mut self) -> Result<FixedHeader, RawError<B::ProvisionError>> {
+    /// Cancel-safe method to receive a packet
+    pub async fn recv(&mut self) -> Result<PacketDecodeToken, RawError> {
         let net = self.n.get()?;
 
-        loop {
-            match self.header.update(net).await {
-                Ok(None) => {}
-                Ok(Some(h)) => return Ok(h),
-                Err(e) => {
-                    let e: RxError<_, _> = e.into();
-                    return Err(self.handle_rx(e));
-                }
-            }
-        }
+        // self.receiver
+        //     .poll(net)
+        //     .await
+        //     .map_err(|e| Self::handle_rx(&mut self.n, e))
+        todo!()
+    }
+
+    pub fn decode<'p, P: RxPacket<'p>>(
+        &'p mut self,
+        token: PacketDecodeToken,
+    ) -> Result<(P, RawHandle<'p, N>), RawError> {
+        let decoder: PacketDecoder<'_> = self.receiver.into_decoder(token);
+
+        // let p = P::decode(decoder).map_err(|e| Self::handle_rx(&mut self.n, e))?;
+
+        // Ok((p, RawHandle { n: &mut self.n }))
+        todo!()
     }
 
     /// Not cancel-safe
-    ///
-    /// Does not perform a check on headers packet type
-    /// => Assumes you call this only for correct packet headers
-    pub async fn recv_body<P: RxPacket<'b>>(
-        &mut self,
-        header: &FixedHeader,
-    ) -> Result<P, RawError<B::ProvisionError>> {
-        let net = self.n.get()?;
-        let reader = BodyReader::new(net, self.buf, header.remaining_len.size());
-
-        P::receive(header, reader)
-            .await
-            .map_err(|e| self.handle_rx(e))
-    }
-
-    // pub async fn recv_full<P: RxPacket<'b>>(&mut self) -> Result<P, RawError<B::ProvisionError>> {
-    //     let header = self.recv_header().await?;
-    //     let packet_type = header.packet_type().map_err(|_r| {
-    //         self.close_with(Some(ReasonCode::MalformedPacket));
-    //         RawError::Server
-    //     })?;
-    //     if packet_type != P::PACKET_TYPE {
-    //         self.close_with(Some(ReasonCode::ImplementationSpecificError));
-    //         return Err(RawError::UnexpectedPacketType);
-    //     }
-
-    //     self.recv_body(&header).await
-    // }
-
-    pub async fn send<P: TxPacket>(
-        &mut self,
-        packet: &P,
-    ) -> Result<(), RawError<B::ProvisionError>> {
-        let net = self.n.get()?;
-
-        packet.send(net).await.map_err(|e| self.handle_tx(e))
+    pub async fn send<P: TxPacket>(&mut self, packet: &P) -> Result<(), RawError> {
+        self.n.with_net(|n| packet.send(n), Into::into).await
     }
 
     /// Cancel-safe if N::flush() is cancel-safe
-    pub async fn flush(&mut self) -> Result<(), RawError<B::ProvisionError>> {
-        self.n.get()?.flush().await.map_err(|e| {
-            let e: WriteError<_> = e.into();
-            let e: TxError<_> = e.into();
-            self.handle_tx(e)
-        })
+    pub async fn flush(&mut self) -> Result<(), RawError> {
+        self.n
+            .with_net(|n| n.flush(), |e| TxError::Write(e).into())
+            .await
     }
 }
 

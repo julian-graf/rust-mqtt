@@ -1,9 +1,6 @@
 //! Contains the main `Event` and content types the client can emit.
 
-use crate::{
-    bytes::Bytes,
-    types::{IdentifiedQoS, MqttString, ReasonCode},
-};
+use crate::types::{IdentifiedQoS, MqttString, ReasonCode};
 
 /// Events emitted by the client when receiving an MQTT packet.
 #[derive(Debug)]
@@ -112,7 +109,7 @@ pub struct Publish<'p> {
     pub topic: MqttString<'p>,
 
     /// The application message of this publication.
-    pub message: Bytes<'p>,
+    pub message: &'p [u8],
 }
 
 /// Content of `Event::PublishAcknowledged`, `Event::PublishReceived`, `Event::PublishReleased` and

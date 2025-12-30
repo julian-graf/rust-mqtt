@@ -3,8 +3,6 @@
 use core::hint::unreachable_unchecked;
 
 use crate::{
-    buffer::BufferProvider,
-    bytes::Bytes,
     client::{
         event::{Event, Puback, Publish, Pubrej, Suback},
         info::ConnectInfo,
@@ -13,7 +11,7 @@ use crate::{
     },
     config::{ClientConfig, ServerConfig, SessionExpiryInterval, SharedConfig},
     fmt::{debug, error, panic, warn},
-    header::{FixedHeader, PacketType},
+    header::PacketType,
     io::net::Transport,
     packet::Packet,
     session::{CPublishFlightState, SPublishFlightState, Session},
@@ -30,20 +28,20 @@ use crate::{
 use heapless::Vec;
 
 mod err;
+mod raw;
 
 pub mod event;
 pub mod info;
 pub mod options;
-pub mod raw;
 
 pub use err::Error as MqttError;
 
+// Skip formatting to keep comma before closing > (see https://github.com/rust-lang/rust/issues/150163)
 /// An MQTT client.
 #[derive(Debug)]
 pub struct Client<
     'c,
     N: Transport,
-    B: BufferProvider<'c>,
     const MAX_SUBSCRIBES: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
@@ -53,7 +51,7 @@ pub struct Client<
     server_config: ServerConfig,
     session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
 
-    raw: Raw<'c, N, B>,
+    raw: Raw<'c, N>,
 
     packet_identifier_counter: u16,
 
@@ -66,24 +64,23 @@ pub struct Client<
 impl<
     'c,
     N: Transport,
-    B: BufferProvider<'c>,
     const MAX_SUBSCRIBES: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
-> Client<'c, N, B, MAX_SUBSCRIBES, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+> Client<'c, N, MAX_SUBSCRIBES, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
     /// Creates a new, disconnected MQTT client using a buffer provider to store
     /// dynamically sized fields of received packets.
     /// The session state is initialised as a new session. If you want to start the
     /// client with an existing session, use `Client::with_session()`
-    pub fn new(buffer: &'c mut B) -> Self {
+    pub fn new(rx_buffer: &'c mut [u8]) -> Self {
         Self {
             client_config: ClientConfig::default(),
             shared_config: SharedConfig::default(),
             server_config: ServerConfig::default(),
             session: Session::default(),
 
-            raw: Raw::new_disconnected(buffer),
+            raw: Raw::new_disconnected(rx_buffer),
 
             packet_identifier_counter: 1,
 
@@ -96,7 +93,7 @@ impl<
     /// dynamically sized fields of received packets.
     pub fn with_session(
         session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
-        buffer: &'c mut B,
+        buffer: &'c mut [u8],
     ) -> Self {
         let mut s = Self::new(buffer);
         s.session = session;
@@ -143,6 +140,7 @@ impl<
     /// Returns a mutable reference to the supplied `BufferProvider` implementation.
     ///
     /// This can for example be used to reset the underlying buffer if using `BumpBuffer`.
+    #[cfg(feature = "discrete-read")]
     #[inline]
     pub fn buffer(&mut self) -> &mut B {
         self.raw.buffer()
@@ -193,14 +191,11 @@ impl<
     /// # Returns:
     /// Information not being used currently by the client and therefore stored in its fields.
     pub async fn connect<'d>(
-        &mut self,
+        &'d mut self,
         net: N,
         options: &ConnectOptions<'_>,
         client_identifier: Option<MqttString<'d>>,
-    ) -> Result<ConnectInfo<'d>, MqttError<'c>>
-    where
-        'c: 'd,
-    {
+    ) -> Result<ConnectInfo<'d>, MqttError<'d>> {
         if options.clean_start {
             self.session.clear();
         }
@@ -215,10 +210,7 @@ impl<
         self.client_config.session_expiry_interval = options.session_expiry_interval;
 
         {
-            let packet_client_identifier = client_identifier
-                .as_ref()
-                .map(|s| s.as_borrowed())
-                .unwrap_or_default();
+            let packet_client_identifier = client_identifier.clone().unwrap_or_default();
 
             let mut packet = ConnectPacket::new(
                 packet_client_identifier,
@@ -229,10 +221,10 @@ impl<
             );
 
             if let Some(ref user_name) = options.user_name {
-                packet.add_user_name(user_name.as_borrowed());
+                packet.add_user_name(user_name.clone());
             }
             if let Some(ref password) = options.password {
-                packet.add_password(password.as_borrowed());
+                packet.add_password(password.clone());
             }
 
             if let Some(ref will) = options.will {
@@ -247,9 +239,10 @@ impl<
             self.raw.flush().await?;
         }
 
-        debug!("awaiting CONNACK packet header");
+        debug!("awaiting CONNACK packet");
 
-        let header = self.raw.recv_header().await?;
+        let decode_token = self.raw.recv().await?;
+        let header = decode_token.header();
 
         match header.packet_type() {
             Ok(ConnackPacket::PACKET_TYPE) => {}
@@ -264,7 +257,9 @@ impl<
             }
         }
 
-        debug!("awaiting CONNACK packet body");
+        debug!("decoding CONNACK packet body");
+
+        let (p, mut r) = self.raw.decode(decode_token)?;
 
         let ConnackPacket {
             session_present,
@@ -285,7 +280,7 @@ impl<
             server_reference: _,
             authentication_method: _,
             authentication_data: _,
-        } = self.raw.recv_body(&header).await?;
+        } = p;
 
         debug!("received CONNACK packet");
 
@@ -302,7 +297,7 @@ impl<
                 .or(client_identifier)
                 .ok_or_else(|| {
                     error!("server did not assign a client identifier when it was required.");
-                    self.raw.close_with(Some(ReasonCode::ProtocolError));
+                    r.as_mut().close_with(Some(ReasonCode::ProtocolError));
                     MqttError::Server
                 })?;
 
@@ -344,7 +339,7 @@ impl<
         } else {
             debug!("CONNACK packet indicates rejection");
 
-            self.raw.close_with(None);
+            r.as_mut().close_with(None);
 
             Err(MqttError::Disconnect {
                 reason: reason_code,
@@ -437,7 +432,7 @@ impl<
     pub async fn publish(
         &mut self,
         options: &PublicationOptions<'_>,
-        message: Bytes<'_>,
+        message: &[u8],
     ) -> Result<u16, MqttError<'c>> {
         if options.qos > QoS::AtMostOnce {
             if self.remaining_send_quota() == 0 {
@@ -461,7 +456,7 @@ impl<
             false,
             options.retain,
             identified_qos,
-            options.topic.as_ref().as_borrowed(),
+            options.topic.as_ref().clone(),
             message,
         )?;
 
@@ -498,7 +493,7 @@ impl<
         &mut self,
         packet_identifier: u16,
         options: &PublicationOptions<'_>,
-        message: Bytes<'_>,
+        message: &[u8],
     ) -> Result<(), MqttError<'c>> {
         if options.qos == QoS::AtMostOnce {
             panic!("QoS 0 packets cannot be republished");
@@ -531,7 +526,7 @@ impl<
             true,
             options.retain,
             identified_qos,
-            options.topic.as_ref().as_borrowed(),
+            options.topic.as_ref().clone(),
             message,
         )?;
 
@@ -621,9 +616,7 @@ impl<
         Ok(())
     }
 
-    /// Combines `Client::poll_header` and `Client::poll_body`.
-    ///
-    /// Polls the network for a full packet. Not cancel-safe.
+    /// Polls the network for a full packet. Cancel-safe.
     ///
     /// # Preconditions:
     /// - The last MQTT packet was received completely
@@ -631,55 +624,19 @@ impl<
     ///
     /// # Returns:
     /// - MQTT Events. Their further meaning is documented in `Event`
-    pub async fn poll(&mut self) -> Result<Event<'c>, MqttError<'c>> {
-        let header = self.poll_header().await?;
-        self.poll_body(header).await
-    }
-
-    /// Polls the network for a fixed header in a cancel-safe way.
-    ///
-    /// If a fixed header is received, the first 4 bits (packet type) are checked for correctness.
-    ///
-    /// # Preconditions:
-    /// - The last MQTT packet was received completely
-    /// - The client did not return a non-recoverable Error before
-    ///
-    /// # Returns:
-    /// - The received fixed header with a valid packet type. It can be used to call `poll_body`
-    pub async fn poll_header(&mut self) -> Result<FixedHeader, MqttError<'c>> {
-        let header = self.raw.recv_header().await?;
-
-        match header.packet_type() {
-            Ok(p) => debug!("received header of {:?}", p),
-            Err(_) => {
-                error!("received invalid header {:?}", header);
-                self.raw.close_with(Some(ReasonCode::MalformedPacket));
-                return Err(MqttError::Server);
-            }
-        }
-
-        Ok(header)
-    }
-
-    /// Polls the network for the variable header and payload of a packet. Not cancel-safe.
-    ///
-    /// # Preconditions:
-    /// - The FixedHeader argument was received from the network right before.
-    /// - The client did not return a non-recoverable Error before
-    ///
-    /// # Returns:
-    /// - MQTT Events for regular communication. Their further meaning is documented in `Event`.
     /// - `MqttError::Disconnect` when receiving a DISCONNECT packet.
-    pub async fn poll_body(&mut self, header: FixedHeader) -> Result<Event<'c>, MqttError<'c>> {
-        let event = match header.packet_type()? {
+    pub async fn poll(&mut self) -> Result<Event<'c>, MqttError<'c>> {
+        let decode_token = self.raw.recv().await?;
+
+        let event = match decode_token.header().packet_type()? {
             PacketType::Pingresp => {
-                debug!("receiving PINGRESP packet");
-                self.raw.recv_body::<PingrespPacket>(&header).await?;
+                debug!("receiving PINGRESP packet(");
+                self.raw.decode::<PingrespPacket>(decode_token)?;
                 Event::Pingresp
             }
             PacketType::Suback => {
                 debug!("receiving SUBACK packet");
-                let suback = self.raw.recv_body::<SubackPacket<'_, 1>>(&header).await?;
+                let (suback, _) = self.raw.decode::<SubackPacket<'_, 1>>(decode_token)?;
                 let pid = suback.packet_identifier;
 
                 if Self::remove_packet_identifier_if_exists(&mut self.pending_suback, pid) {
@@ -700,7 +657,7 @@ impl<
             }
             PacketType::Unsuback => {
                 debug!("receiving UNSUBACK packet");
-                let unsuback = self.raw.recv_body::<UnsubackPacket<'_, 1>>(&header).await?;
+                let (unsuback, _) = self.raw.decode::<UnsubackPacket<'_, 1>>(decode_token)?;
                 let pid = unsuback.packet_identifier;
 
                 if Self::remove_packet_identifier_if_exists(&mut self.pending_unsuback, pid) {
@@ -722,7 +679,7 @@ impl<
             }
             PacketType::Publish => {
                 debug!("receiving PUBLISH packet");
-                let publish = self.raw.recv_body::<PublishPacket>(&header).await?;
+                let (publish, r) = self.raw.decode::<PublishPacket>(decode_token)?;
 
                 let event = Event::Publish(Publish {
                     identified_qos: publish.identified_qos,
@@ -784,7 +741,7 @@ impl<
             }
             PacketType::Puback => {
                 debug!("receiving PUBACK packet");
-                let puback = self.raw.recv_body::<PubackPacket>(&header).await?;
+                let (puback, _) = self.raw.decode::<PubackPacket>(decode_token)?;
                 let pid = puback.packet_identifier;
                 let reason_code = puback.reason_code;
 
@@ -819,7 +776,7 @@ impl<
             }
             PacketType::Pubrec => {
                 debug!("receiving PUBREC packet");
-                let pubrec = self.raw.recv_body::<PubrecPacket>(&header).await?;
+                let (pubrec, _) = self.raw.decode::<PubrecPacket>(decode_token)?;
                 let pid = pubrec.packet_identifier;
                 let reason_code = pubrec.reason_code;
 
@@ -869,7 +826,7 @@ impl<
             }
             PacketType::Pubrel => {
                 debug!("receiving PUBREL packet");
-                let pubrel = self.raw.recv_body::<PubrelPacket>(&header).await?;
+                let (pubrel, _) = self.raw.decode::<PubrelPacket>(decode_token)?;
                 let pid = pubrel.packet_identifier;
                 let reason_code = pubrel.reason_code;
 
@@ -903,7 +860,7 @@ impl<
             }
             PacketType::Pubcomp => {
                 debug!("receiving PUBCOMP packet");
-                let pubcomp = self.raw.recv_body::<PubcompPacket>(&header).await?;
+                let (pubcomp, _) = self.raw.decode::<PubcompPacket>(decode_token)?;
                 let pid = pubcomp.packet_identifier;
                 let reason_code = pubcomp.reason_code;
 
@@ -938,7 +895,7 @@ impl<
             }
             PacketType::Disconnect => {
                 debug!("receiving DISCONNECT packet");
-                let disconnect = self.raw.recv_body::<DisconnectPacket>(&header).await?;
+                let (disconnect, _) = self.raw.decode::<DisconnectPacket>(decode_token)?;
 
                 return Err(MqttError::Disconnect {
                     reason: disconnect.reason_code,

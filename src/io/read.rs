@@ -1,157 +1,57 @@
-use core::{cmp::min, marker::PhantomData};
-
 use crate::{
-    buffer::BufferProvider,
-    bytes::Bytes,
-    eio::{ErrorType, Read},
-    fmt::trace,
-    io::err::{BodyReadError, ReadError},
+    io::{err::DecodeError, reader::PacketDecoder},
     types::{MqttBinary, MqttString},
 };
 
-pub trait Readable<R: Read>: Sized {
-    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>>;
+pub trait Readable<'r>: Sized + 'r {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError>;
 }
 
-pub trait Store<'a>: Read {
-    async fn read_and_store(&mut self, len: usize) -> Result<Bytes<'a>, ReadError<Self::Error>>;
-}
-
-impl<R: Read, const N: usize> Readable<R> for [u8; N] {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        trace!("reading array of {} bytes", N);
-
+impl<'r, const N: usize> Readable<'r> for [u8; N] {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
         let mut array = [0; N];
-        let mut slice = &mut array[..];
-        while !slice.is_empty() {
-            match read.read(slice).await.map_err(ReadError::Read)? {
-                0 => return Err(ReadError::UnexpectedEOF),
-                n => slice = &mut slice[n..],
-            }
-        }
+        array.copy_from_slice(read.take_bytes(N)?);
+
         Ok(array)
     }
 }
-impl<R: Read> Readable<R> for u8 {
-    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
-        <[u8; 1]>::read(read).await.map(Self::from_be_bytes)
+impl<'r> Readable<'r> for u8 {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        <[u8; 1]>::read(read).map(Self::from_be_bytes)
     }
 }
-impl<R: Read> Readable<R> for u16 {
-    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
-        <[u8; 2]>::read(read).await.map(Self::from_be_bytes)
+impl<'r> Readable<'r> for u16 {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        <[u8; 2]>::read(read).map(Self::from_be_bytes)
     }
 }
-impl<R: Read> Readable<R> for u32 {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        <[u8; 4]>::read(read).await.map(Self::from_be_bytes)
+impl<'r> Readable<'r> for u32 {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        <[u8; 4]>::read(read).map(Self::from_be_bytes)
     }
 }
-impl<R: Read> Readable<R> for bool {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        match u8::read(read).await? {
+impl<'r> Readable<'r> for bool {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        match u8::read(read)? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(ReadError::MalformedPacket),
+            _ => Err(DecodeError::MalformedPacket),
         }
     }
 }
-impl<'b, R: Read + Store<'b>> Readable<R> for MqttBinary<'b> {
-    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
-        let len = u16::read(read).await? as usize;
+impl<'r> Readable<'r> for MqttBinary<'r> {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let len = u16::read(read)?;
 
-        trace!("reading slice of {} bytes", len);
-
-        Ok(MqttBinary(read.read_and_store(len).await?))
+        // Safety: `len` is u16 and therefore always greater than or equal to MqttBinary::MAX_ENCODABLE, which is u16::MAX
+        Ok(unsafe { MqttBinary::from_slice_unchecked(read.take_bytes(len as usize)?) })
     }
 }
-impl<'s, R: Read + Store<'s>> Readable<R> for MqttString<'s> {
-    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
-        MqttBinary::read(read)
-            .await?
+impl<'r> Readable<'r> for MqttString<'r> {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        MqttBinary::read(read)?
             .try_into()
-            .map_err(|_| ReadError::MalformedPacket)
-    }
-}
-
-pub struct BodyReader<'r, 'b, R: Read, B: BufferProvider<'b>> {
-    r: &'r mut R,
-    buffer: &'r mut B,
-    remaining_len: usize,
-    _b: PhantomData<&'b ()>,
-}
-
-impl<'b, R: Read, B: BufferProvider<'b>> ErrorType for BodyReader<'_, 'b, R, B> {
-    type Error = BodyReadError<R::Error, B::ProvisionError>;
-}
-impl<'b, R: Read, B: BufferProvider<'b>> Read for BodyReader<'_, 'b, R, B> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        if !buf.is_empty() && self.remaining_len == 0 {
-            return Err(BodyReadError::InsufficientRemainingLen);
-        }
-        let len = min(buf.len(), self.remaining_len);
-        let buf = &mut buf[..len];
-        let read = self.r.read(buf).await?;
-        self.remaining_len -= read;
-        Ok(read)
-    }
-}
-impl<'r, 'b, R: Read, B: BufferProvider<'b>> Store<'b> for BodyReader<'r, 'b, R, B> {
-    async fn read_and_store(&mut self, len: usize) -> Result<Bytes<'b>, ReadError<Self::Error>> {
-        if self.remaining_len < len {
-            return Err(ReadError::Read(BodyReadError::InsufficientRemainingLen));
-        }
-        let mut buffer = self
-            .buffer
-            .provide_buffer(len)
-            .map_err(BodyReadError::Buffer)?;
-
-        let slice = buffer.as_mut();
-
-        let mut filled = 0;
-        while filled < len {
-            match self.read(&mut slice[filled..]).await? {
-                0 => return Err(ReadError::UnexpectedEOF),
-                n => filled += n,
-            }
-        }
-
-        Ok(buffer.into())
-    }
-}
-
-impl<'r, 'b, R: Read, B: BufferProvider<'b>> BodyReader<'r, 'b, R, B> {
-    pub fn new(r: &'r mut R, buffer: &'r mut B, remaining_len: usize) -> Self {
-        Self {
-            r,
-            buffer,
-            remaining_len,
-            _b: PhantomData,
-        }
-    }
-
-    pub fn remaining_len(&self) -> usize {
-        self.remaining_len
-    }
-
-    pub async fn skip(
-        &mut self,
-        len: usize,
-    ) -> Result<(), BodyReadError<R::Error, B::ProvisionError>> {
-        self.remaining_len -= len;
-        let mut missing = len;
-
-        const CHUNK_SIZE: usize = 16;
-        let mut buf = [0; CHUNK_SIZE];
-        while missing > 0 {
-            let buf = &mut buf[0..min(CHUNK_SIZE, missing)];
-            match self.r.read(buf).await? {
-                0 => return Err(BodyReadError::UnexpectedEOF),
-                r => missing -= r,
-            }
-        }
-
-        Ok(())
+            .map_err(|_| DecodeError::MalformedPacket)
     }
 }
 
@@ -160,7 +60,7 @@ mod unit {
     mod readable {
         use tokio_test::{assert_err, assert_ok};
 
-        use crate::{io::err::ReadError, io::read::Readable, test::read::SliceReader};
+        use crate::{io::err::DecodeError, io::read::Readable, test::read::SliceReader};
 
         #[tokio::test]
         #[test_log::test]
@@ -207,7 +107,7 @@ mod unit {
 
             let mut r_bad = SliceReader::new(b"\x02");
             let res = bool::read(&mut r_bad).await;
-            assert!(matches!(res, Err(ReadError::MalformedPacket)));
+            assert!(matches!(res, Err(DecodeError::MalformedPacket)));
         }
 
         #[tokio::test]
@@ -215,19 +115,19 @@ mod unit {
         async fn read_eof() {
             let mut r = SliceReader::new(b"abcdefghijklmno");
             let e = assert_err!(<[u8; 16]>::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut r = SliceReader::new(b"");
             let e = assert_err!(u8::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut r = SliceReader::new(b"\x00");
             let e = assert_err!(u16::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut r = SliceReader::new(b"\x00\x00\x00");
             let e = assert_err!(u32::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
         }
     }
 
@@ -241,7 +141,7 @@ mod unit {
 
         use crate::{
             io::{
-                err::{BodyReadError, ReadError},
+                err::{BodyReadError, DecodeError},
                 read::{BodyReader, Readable},
             },
             test::read::SliceReader,
@@ -349,7 +249,7 @@ mod unit {
 
             let mut r_bad = BodyReader::new(&mut s_bad, &mut b_bad, 1);
             let res = bool::read(&mut r_bad).await;
-            assert!(matches!(res, Err(ReadError::MalformedPacket)));
+            assert!(matches!(res, Err(DecodeError::MalformedPacket)));
         }
 
         #[tokio::test]
@@ -445,7 +345,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 16);
             let e = assert_err!(<[u8; 16]>::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut s = SliceReader::new(b"");
             #[cfg(feature = "alloc")]
@@ -457,7 +357,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 1);
             let e = assert_err!(u8::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut s = SliceReader::new(b"\x00");
             #[cfg(feature = "alloc")]
@@ -469,7 +369,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 2);
             let e = assert_err!(u16::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             let mut s = SliceReader::new(b"\x00\x00\x00");
             #[cfg(feature = "alloc")]
@@ -481,7 +381,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 4);
             let e = assert_err!(u32::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             // MqttBinary - EOF when reading length
             let mut s = SliceReader::new(b"\x00");
@@ -494,7 +394,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 2);
             let e = assert_err!(MqttBinary::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             // MqttBinary - EOF when reading data
             let mut s = SliceReader::new(&[0x00, 0x05, 0x01, 0x02]);
@@ -507,7 +407,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 7);
             let e = assert_err!(MqttBinary::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             // MqttString - EOF when reading length
             let mut s = SliceReader::new(b"\x00");
@@ -520,7 +420,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 2);
             let e = assert_err!(MqttString::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
 
             // MqttString - EOF when reading data
             let mut s = SliceReader::new(&[0x00, 0x04, b't', b'e']);
@@ -533,7 +433,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 6);
             let e = assert_err!(MqttString::read(&mut r).await);
-            assert_eq!(e, ReadError::UnexpectedEOF);
+            assert_eq!(e, DecodeError::UnexpectedEOF);
         }
 
         #[tokio::test]
@@ -549,7 +449,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 15);
             let e = assert_err!(<[u8; 16]>::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             let mut s = SliceReader::new(b"abcdefghijklmnop");
             #[cfg(feature = "alloc")]
@@ -561,7 +461,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 15);
             let e = assert_err!(<[u8; 16]>::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
         #[tokio::test]
         #[test_log::test]
@@ -576,7 +476,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 0);
             let e = assert_err!(u8::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             let mut s = SliceReader::new(b"");
             #[cfg(feature = "alloc")]
@@ -588,7 +488,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 0);
             let e = assert_err!(u8::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
         #[tokio::test]
         #[test_log::test]
@@ -603,7 +503,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 1);
             let e = assert_err!(u16::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             let mut s = SliceReader::new(b"\x00\x00");
             #[cfg(feature = "alloc")]
@@ -615,7 +515,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 1);
             let e = assert_err!(u16::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
         #[tokio::test]
         #[test_log::test]
@@ -630,7 +530,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 3);
             let e = assert_err!(u32::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             let mut s = SliceReader::new(b"\x00\x00\x00\x00");
             #[cfg(feature = "alloc")]
@@ -642,7 +542,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 3);
             let e = assert_err!(u32::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
 
         #[tokio::test]
@@ -659,7 +559,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 1);
             let e = assert_err!(MqttBinary::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             // Insufficient remaining length when reading data
             let mut s = SliceReader::new(&[0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0xFF]);
@@ -672,7 +572,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 6);
             let e = assert_err!(MqttBinary::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             // Insufficient remaining length with exact length prefix bytes but not enough for data
             let mut s = SliceReader::new(&[0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0xFF]);
@@ -685,7 +585,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 2);
             let e = assert_err!(MqttBinary::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
 
         #[tokio::test]
@@ -702,7 +602,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 1);
             let e = assert_err!(MqttString::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             // Insufficient remaining length when reading data
             let mut s = SliceReader::new(&[0x00, 0x04, b't', b'e', b's', b't']);
@@ -715,7 +615,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 5);
             let e = assert_err!(MqttString::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
 
             // Insufficient remaining length with exact length prefix bytes but not enough for data
             let mut s = SliceReader::new(&[0x00, 0x04, b't', b'e', b's', b't']);
@@ -728,7 +628,7 @@ mod unit {
 
             let mut r = BodyReader::new(&mut s, &mut b, 2);
             let e = assert_err!(MqttString::read(&mut r).await);
-            assert_eq!(e, ReadError::Read(BodyReadError::InsufficientRemainingLen));
+            assert_eq!(e, DecodeError::Read(BodyReadError::InsufficientRemainingLen));
         }
     }
 }

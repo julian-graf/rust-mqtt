@@ -1,4 +1,4 @@
-use crate::{eio::Read, io::err::ReadError, types::VarByteInt};
+use crate::{eio::Read, io::err::DecodeError, types::VarByteInt};
 use tokio_test::assert_ok;
 
 #[cfg(feature = "alloc")]
@@ -26,7 +26,7 @@ macro_rules! decode {
 }
 
 impl<R: Read> Readable<R> for FixedHeader {
-    async fn read(net: &mut R) -> Result<Self, ReadError<R::Error>> {
+    async fn read(net: &mut R) -> Result<Self, DecodeError<R::Error>> {
         let type_and_flags = u8::read(net).await?;
         let remaining_len = VarByteInt::read(net).await?;
         Ok(Self {
@@ -57,7 +57,7 @@ pub async fn decode_packet<'a, T: RxPacket<'a>, const N: usize, const REMAINING_
     );
 
     let reader = BodyReader::new(&mut reader, &mut buffer, REMAINING_LEN);
-    let result = T::receive(&header, reader).await;
+    let result = T::decode(&header, reader).await;
     let packet = assert_ok!(result);
 
     packet

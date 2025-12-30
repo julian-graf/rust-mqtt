@@ -1,7 +1,7 @@
 use crate::{
     config::{KeepAlive, SessionExpiryInterval},
     types::{MqttBinary, MqttString, QoS, Will},
-    v5::property::{PayloadFormatIndicator, WillDelayInterval},
+    v5::property::{ContentType, PayloadFormatIndicator, WillDelayInterval},
 };
 
 /// Options for a connection.
@@ -78,7 +78,7 @@ pub struct WillOptions<'c> {
 impl<'c> WillOptions<'c> {
     pub(crate) fn as_will(&'c self) -> Will<'c> {
         Will {
-            will_topic: self.will_topic.as_borrowed(),
+            will_topic: self.will_topic.clone(),
             will_delay_interval: match self.will_delay_interval {
                 0 => None,
                 i => Some(WillDelayInterval(i)),
@@ -88,22 +88,18 @@ impl<'c> WillOptions<'c> {
                 true => Some(PayloadFormatIndicator(true)),
             },
             message_expiry_interval: self.message_expiry_interval.map(Into::into),
-            content_type: self
-                .content_type
-                .as_ref()
-                .map(MqttString::as_borrowed)
-                .map(Into::into),
+            content_type: self.content_type.as_ref().map(Clone::clone).map(Into::into),
             response_topic: self
                 .response_topic
                 .as_ref()
-                .map(MqttString::as_borrowed)
+                .map(Clone::clone)
                 .map(Into::into),
             correlation_data: self
                 .correlation_data
                 .as_ref()
-                .map(MqttBinary::as_borrowed)
+                .map(Clone::clone)
                 .map(Into::into),
-            will_payload: self.will_payload.as_borrowed(),
+            will_payload: self.will_payload.clone(),
         }
     }
 }

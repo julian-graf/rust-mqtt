@@ -1,9 +1,10 @@
 use crate::{
     config::{KeepAlive, MaximumPacketSize, ReceiveMaximum, SessionExpiryInterval},
-    eio::{Read, Write},
+    eio::Write,
     io::{
-        err::{ReadError, WriteError},
-        read::{Readable, Store},
+        err::{DecodeError, WriteError},
+        read::Readable,
+        reader::PacketDecoder,
         write::{Writable, wlen},
     },
     types::{MqttBinary, MqttString, QoS, VarByteInt},
@@ -29,9 +30,9 @@ macro_rules! property {
             }
         }
 
-        impl<R: Read> Readable<R> for $name {
-            async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-                let content = <$ty as Readable<R>>::read(read).await?;
+        impl<'r> Readable<'r> for $name {
+            fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+                let content = <$ty as Readable<'r>>::read(read)?;
                 Ok(Self(content))
             }
         }
@@ -68,9 +69,9 @@ macro_rules! property {
             }
         }
 
-        impl<$lt, R: Read + Store<$lt>> Readable<R> for $name<$lt> {
-            async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-                let content = <$ty as Readable<R>>::read(read).await?;
+        impl<$lt> Readable<$lt> for $name<$lt> {
+            fn read(read: &mut PacketDecoder<$lt>) -> Result<Self, DecodeError> {
+                let content = <$ty as Readable<$lt>>::read(read)?;
                 Ok(Self(content))
             }
         }
@@ -135,9 +136,9 @@ impl Property for ServerKeepAlive {
     }
 }
 
-impl<R: Read> Readable<R> for ServerKeepAlive {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let value = u16::read(read).await?;
+impl<'r> Readable<'r> for ServerKeepAlive {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let value = u16::read(read)?;
 
         Ok(Self(match value {
             0 => KeepAlive::Infinite,
@@ -177,9 +178,9 @@ impl Property for SessionExpiryInterval {
     }
 }
 
-impl<R: Read> Readable<R> for SessionExpiryInterval {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let value = u32::read(read).await?;
+impl<'r> Readable<'r> for SessionExpiryInterval {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let value = u32::read(read)?;
 
         Ok(match value {
             0 => Self::EndOnDisconnect,
@@ -220,10 +221,10 @@ impl Property for MaximumQoS {
         self.0
     }
 }
-impl<R: Read> Readable<R> for MaximumQoS {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let byte = u8::read(read).await?;
-        let qos = QoS::try_from_bits(byte).map_err(|_| ReadError::MalformedPacket)?;
+impl<'r> Readable<'r> for MaximumQoS {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let byte = u8::read(read)?;
+        let qos = QoS::try_from_bits(byte).map_err(|_| DecodeError::MalformedPacket)?;
         Ok(Self(qos))
     }
 }
@@ -236,11 +237,11 @@ impl Property for TopicAlias {
         self.0
     }
 }
-impl<R: Read> Readable<R> for TopicAlias {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let topic_alias = u16::read(read).await?;
+impl<'r> Readable<'r> for TopicAlias {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let topic_alias = u16::read(read)?;
         if topic_alias == 0 {
-            Err(ReadError::ProtocolError)
+            Err(DecodeError::ProtocolError)
         } else {
             Ok(Self(topic_alias))
         }
@@ -265,14 +266,14 @@ impl Property for MaximumPacketSize {
         self
     }
 }
-impl<R: Read> Readable<R> for MaximumPacketSize {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let max = u32::read(read).await?;
+impl<'r> Readable<'r> for MaximumPacketSize {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let max = u32::read(read)?;
 
         if max > 0 {
             Ok(Self::Limit(max))
         } else {
-            Err(ReadError::ProtocolError)
+            Err(DecodeError::ProtocolError)
         }
     }
 }
@@ -302,14 +303,14 @@ impl Property for ReceiveMaximum {
         self.0
     }
 }
-impl<R: Read> Readable<R> for ReceiveMaximum {
-    async fn read(read: &mut R) -> Result<Self, ReadError<<R>::Error>> {
-        let max = u16::read(read).await?;
+impl<'r> Readable<'r> for ReceiveMaximum {
+    fn read(read: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let max = u16::read(read)?;
 
         if max > 0 {
             Ok(Self(max))
         } else {
-            Err(ReadError::ProtocolError)
+            Err(DecodeError::ProtocolError)
         }
     }
 }

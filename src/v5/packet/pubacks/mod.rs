@@ -5,12 +5,12 @@
 use core::marker::PhantomData;
 
 use crate::{
-    buffer::BufferProvider,
-    eio::{Read, Write},
+    eio::Write,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
+        read::Readable,
+        reader::PacketDecoder,
         write::{Writable, wlen},
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
@@ -41,27 +41,25 @@ impl<'p, T: PubackPacketType> Packet for GenericPubackPacket<'p, T> {
     const PACKET_TYPE: PacketType = T::PACKET_TYPE;
 }
 impl<'p, T: PubackPacketType> RxPacket<'p> for GenericPubackPacket<'p, T> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
-        header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+    fn decode(mut decoder: PacketDecoder<'p>) -> Result<Self, RxError> {
         trace!("decoding");
+        let header = decoder.header().clone();
 
         if header.flags() != T::FLAGS {
             error!("flags are not matching");
             return Err(RxError::MalformedPacket);
         }
 
-        let r = &mut reader;
+        let d = &mut decoder;
 
         trace!("reading packet identifier");
-        let packet_identifier = u16::read(r).await?;
+        let packet_identifier = u16::read(d)?;
 
         let reason_code = if header.remaining_len.size() == 2 {
             ReasonCode::Success
         } else {
             trace!("reading reason code");
-            let c = ReasonCode::read(r).await?;
+            let c = ReasonCode::read(d)?;
             if !T::reason_code_allowed(c) {
                 error!("invalid reason code: {:?}", c);
                 return Err(RxError::ProtocolError);
@@ -75,36 +73,36 @@ impl<'p, T: PubackPacketType> RxPacket<'p> for GenericPubackPacket<'p, T> {
             0
         } else {
             trace!("reading properties length");
-            VarByteInt::read(r).await?.size()
+            VarByteInt::read(d)?.size()
         };
 
         trace!("properties length = {}", properties_length);
 
-        if r.remaining_len() != properties_length {
+        if d.remaining_len() != properties_length {
             error!("properties length is not equal to remaining packet length");
             return Err(RxError::MalformedPacket);
         }
 
-        while r.remaining_len() > 0 {
+        while d.remaining_len() > 0 {
             trace!(
                 "reading property type with remaining len = {}",
-                r.remaining_len()
+                d.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(d)?;
 
             trace!(
                 "reading property body of {:?} with remaining len = {}",
                 property_type,
-                r.remaining_len()
+                d.remaining_len()
             );
             #[rustfmt::skip]
             match property_type {
-                PropertyType::ReasonString => reason_string.try_set(r).await?,
+                PropertyType::ReasonString => reason_string.try_set(d)?,
                 PropertyType::UserProperty => {
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
                 },
                 p => {
                     // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>

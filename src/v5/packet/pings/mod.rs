@@ -1,11 +1,10 @@
 use core::marker::PhantomData;
 
 use crate::{
-    buffer::BufferProvider,
-    eio::{Read, Write},
+    eio::Write,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
-    io::{read::BodyReader, write::Writable},
+    io::{reader::PacketDecoder, write::Writable},
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::VarByteInt,
     v5::packet::pings::types::{PingPacketType, Req, Resp},
@@ -26,13 +25,10 @@ impl<T: PingPacketType> Packet for GenericPingPacket<T> {
     const PACKET_TYPE: PacketType = T::PACKET_TYPE;
 }
 impl<'p, T: PingPacketType> RxPacket<'p> for GenericPingPacket<T> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
-        header: &FixedHeader,
-        _: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+    fn decode(decoder: PacketDecoder<'p>) -> Result<Self, RxError> {
         trace!("decoding");
 
-        if header.flags() != T::FLAGS {
+        if decoder.header().flags() != T::FLAGS {
             error!("flags are not 0");
             Err(RxError::MalformedPacket)
         } else {

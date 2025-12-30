@@ -1,10 +1,8 @@
 use crate::{
-    buffer::BufferProvider,
     config::{MaximumPacketSize, ReceiveMaximum, SessionExpiryInterval},
-    eio::Read,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
-    io::read::{BodyReader, Readable},
+    io::{read::Readable, reader::PacketDecoder},
     packet::{Packet, RxError, RxPacket},
     types::{ReasonCode, VarByteInt},
     v5::property::{
@@ -44,23 +42,20 @@ impl<'p> Packet for ConnackPacket<'p> {
     const PACKET_TYPE: PacketType = PacketType::Connack;
 }
 impl<'p> RxPacket<'p> for ConnackPacket<'p> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
-        header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+    fn decode(mut decoder: PacketDecoder<'p>) -> Result<Self, RxError> {
         trace!("decoding");
 
-        if header.flags() != 0 {
+        if decoder.header().flags() != 0 {
             error!("flags are not 0");
             return Err(RxError::MalformedPacket);
         }
-        let r = &mut reader;
+        let r = &mut decoder;
 
         trace!("reading connack flags");
-        let connack_flags = u8::read(r).await?;
+        let connack_flags = u8::read(r)?;
 
         trace!("reading connect reason code");
-        let connect_reason_code = ReasonCode::read(r).await?;
+        let connect_reason_code = ReasonCode::read(r)?;
         if !matches!(
             connect_reason_code,
             ReasonCode::Success
@@ -119,7 +114,7 @@ impl<'p> RxPacket<'p> for ConnackPacket<'p> {
         };
 
         trace!("reading properties length");
-        let properties_length = VarByteInt::read(r).await?.size();
+        let properties_length = VarByteInt::read(r)?.size();
 
         trace!("properties length = {}", properties_length);
 
@@ -133,7 +128,7 @@ impl<'p> RxPacket<'p> for ConnackPacket<'p> {
                 "reading property type with remaining len = {}",
                 r.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(r)?;
 
             trace!(
                 "reading property body of {:?} with remaining len = {}",
@@ -142,27 +137,27 @@ impl<'p> RxPacket<'p> for ConnackPacket<'p> {
             );
             #[rustfmt::skip]
             match property_type {
-                PropertyType::SessionExpiryInterval => packet.session_expiry_interval.try_set(r).await?,
-                PropertyType::ReceiveMaximum => packet.receive_maximum.try_set(r).await?,
-                PropertyType::MaximumQoS => packet.maximum_qos.try_set(r).await?,
-                PropertyType::RetainAvailable => packet.retain_available.try_set(r).await?,
-                PropertyType::MaximumPacketSize => packet.maximum_packet_size.try_set(r).await?,
-                PropertyType::AssignedClientIdentifier => packet.assigned_client_identifier.try_set(r).await?,
-                PropertyType::TopicAliasMaximum => packet.topic_alias_maximum.try_set(r).await?,
-                PropertyType::ReasonString => packet.reason_string.try_set(r).await?,
-                PropertyType::WildcardSubscriptionAvailable => packet.wildcard_subscription_available.try_set(r).await?,
-                PropertyType::SubscriptionIdentifierAvailable => packet.subscription_identifier_available.try_set(r).await?,
-                PropertyType::SharedSubscriptionAvailable => packet.shared_subscription_available.try_set(r).await?,
-                PropertyType::ServerKeepAlive => packet.server_keep_alive.try_set(r).await?,
-                PropertyType::ResponseInformation => packet.response_information.try_set(r).await?,
-                PropertyType::ServerReference => packet.server_reference.try_set(r).await?,
-                PropertyType::AuthenticationMethod => packet.authentication_method.try_set(r).await?,
-                PropertyType::AuthenticationData => packet.authentication_data.try_set(r).await?,
+                PropertyType::SessionExpiryInterval => packet.session_expiry_interval.try_set(r)?,
+                PropertyType::ReceiveMaximum => packet.receive_maximum.try_set(r)?,
+                PropertyType::MaximumQoS => packet.maximum_qos.try_set(r)?,
+                PropertyType::RetainAvailable => packet.retain_available.try_set(r)?,
+                PropertyType::MaximumPacketSize => packet.maximum_packet_size.try_set(r)?,
+                PropertyType::AssignedClientIdentifier => packet.assigned_client_identifier.try_set(r)?,
+                PropertyType::TopicAliasMaximum => packet.topic_alias_maximum.try_set(r)?,
+                PropertyType::ReasonString => packet.reason_string.try_set(r)?,
+                PropertyType::WildcardSubscriptionAvailable => packet.wildcard_subscription_available.try_set(r)?,
+                PropertyType::SubscriptionIdentifierAvailable => packet.subscription_identifier_available.try_set(r)?,
+                PropertyType::SharedSubscriptionAvailable => packet.shared_subscription_available.try_set(r)?,
+                PropertyType::ServerKeepAlive => packet.server_keep_alive.try_set(r)?,
+                PropertyType::ResponseInformation => packet.response_information.try_set(r)?,
+                PropertyType::ServerReference => packet.server_reference.try_set(r)?,
+                PropertyType::AuthenticationMethod => packet.authentication_method.try_set(r)?,
+                PropertyType::AuthenticationData => packet.authentication_data.try_set(r)?,
                 PropertyType::UserProperty => {
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
+                    let len = u16::read(r)? as usize;
+                    r.skip(len)?;
                 },
                 p => {
                     // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>

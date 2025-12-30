@@ -1,8 +1,9 @@
 use crate::{
-    eio::{Read, Write},
+    eio::{Write},
     io::{
-        err::{ReadError, WriteError},
+        err::{DecodeError, WriteError},
         read::Readable,
+        reader::PacketDecoder,
         write::Writable,
     },
 };
@@ -158,11 +159,11 @@ impl PropertyType {
     }
 }
 
-impl<R: Read> Readable<R> for PropertyType {
-    async fn read(net: &mut R) -> Result<Self, ReadError<R::Error>> {
-        let identifier = u8::read(net).await?;
+impl<'r> Readable<'r> for PropertyType {
+    fn read(net: &mut PacketDecoder<'r>) -> Result<Self, DecodeError> {
+        let identifier = u8::read(net)?;
 
-        Self::from_identifier(identifier).map_err(|_| ReadError::MalformedPacket)
+        Self::from_identifier(identifier).map_err(|_| DecodeError::MalformedPacket)
     }
 }
 

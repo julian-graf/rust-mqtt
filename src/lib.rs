@@ -8,33 +8,21 @@
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "alloc")]
-extern crate alloc;
 
 use embedded_io_async as eio;
-
-#[cfg(all(feature = "bump", feature = "alloc"))]
-compile_error!("You may not enable both `bump` and `alloc` features.");
 
 #[cfg(all(feature = "log", feature = "defmt"))]
 compile_error!("You may not enable both `log` and `defmt` features.");
 
-#[cfg(all(test, not(any(feature = "bump", feature = "alloc"))))]
-compile_error!("Enable either one of `bump` or `alloc` features for testing.");
-
-mod bytes;
 mod fmt;
 mod header;
 mod io;
 mod packet;
 
-pub mod buffer;
 pub mod client;
 pub mod config;
 pub mod session;
 pub mod types;
-
-pub use bytes::Bytes;
 
 #[cfg(test)]
 mod test;

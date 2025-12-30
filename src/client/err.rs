@@ -1,8 +1,5 @@
 use crate::{
-    client::raw::RawError,
-    eio::ErrorKind,
-    header::Reserved,
-    types::{MqttString, ReasonCode, TooLargeToEncode},
+    client::raw::RawError, eio::ErrorKind, header::Reserved, packet::RxError, types::{MqttString, ReasonCode, TooLargeToEncode}
 };
 
 /// The main error returned by `Client`.
@@ -32,11 +29,6 @@ pub enum Error<'e> {
     ///
     /// Unrecoverable error. `Client::abort` should be called.
     ReceiveBuffer,
-
-    /// A buffer provision by the `BufferProvider` failed. Therefore a packet could not be received correctly.
-    ///
-    /// Unrecoverable error. `Client::abort` should be called.
-    Alloc,
 
     /// An AUTH packet header has been received by the client. AUTH packets are not supported by the client.
     /// The client has scheduled a DISCONNECT packet with `ReasonCode::ImplementationSpecificError`.
@@ -108,22 +100,22 @@ impl<'e> Error<'e> {
     }
 }
 
-impl<'e> From<Reserved> for Error<'e> {
-    fn from(_: Reserved) -> Self {
-        Self::Server
-    }
-}
-
-impl<'e, B> From<RawError<B>> for Error<'e> {
-    fn from(e: RawError<B>) -> Self {
+impl<'e> From<RawError> for Error<'e> {
+    fn from(e: RawError) -> Self {
         match e {
-            RawError::PacketTooLong => Self::PacketMaxLengthExceeded,
+            RawError::RxBufferExceeded => todo!("This can be Self::Server if packet max size is sent but has to client side error if not"),
+            RawError::TxPacketTooLong => Self::PacketMaxLengthExceeded,
             RawError::Disconnected => Self::RecoveryRequired,
             RawError::Network(e) => Self::Network(e),
-            RawError::Alloc(_) => Self::Alloc,
             RawError::ConstSpace => Self::ReceiveBuffer,
             RawError::Server => Self::Server,
         }
+    }
+}
+
+impl<'e> From<Reserved> for Error<'e> {
+    fn from(_: Reserved) -> Self {
+        Self::Server
     }
 }
 

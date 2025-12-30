@@ -1,7 +1,4 @@
-use crate::{
-    eio::Read,
-    io::{err::ReadError, read::Readable},
-};
+use crate::io::{err::DecodeError, read::Readable, reader::PacketDecoder};
 
 mod types;
 mod values;
@@ -21,30 +18,16 @@ pub trait Property {
 }
 
 /// Helper trait to read optional, but at max once properties into a packet
-pub trait AtMostOnceProperty<R: Read, T: Property> {
-    async fn try_set(
-        &mut self,
-        read: &mut R,
-    ) -> Result<(), AtMostOncePropertyError<ReadError<R::Error>>>;
+pub trait AtMostOnceProperty<'p, T: Property> {
+    fn try_set(&mut self, read: &mut PacketDecoder<'p>) -> Result<(), DecodeError>;
 }
-pub enum AtMostOncePropertyError<E> {
-    Read(E),
-    AlreadySet,
-}
-impl<E> From<ReadError<E>> for AtMostOncePropertyError<ReadError<E>> {
-    fn from(e: ReadError<E>) -> Self {
-        Self::Read(e)
-    }
-}
-impl<R: Read, T: Property + Readable<R>> AtMostOnceProperty<R, T> for Option<T> {
-    async fn try_set(
-        &mut self,
-        read: &mut R,
-    ) -> Result<(), AtMostOncePropertyError<ReadError<R::Error>>> {
+
+impl<'p, T: Property + Readable<'p>> AtMostOnceProperty<'p, T> for Option<T> {
+    fn try_set(&mut self, read: &mut PacketDecoder<'p>) -> Result<(), DecodeError> {
         if self.is_some() {
-            Err(AtMostOncePropertyError::AlreadySet)
+            Err(DecodeError::ProtocolError)
         } else {
-            let value = T::read(read).await.map_err(AtMostOncePropertyError::Read)?;
+            let value = T::read(read)?;
 
             self.replace(value);
             Ok(())

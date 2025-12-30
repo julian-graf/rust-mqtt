@@ -1,13 +1,13 @@
 #[cfg(test)]
 use crate::types::MqttString;
 use crate::{
-    buffer::BufferProvider,
     config::SessionExpiryInterval,
-    eio::{Read, Write},
+    eio::Write,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
+        read::Readable,
+        reader::PacketDecoder,
         write::{Writable, wlen},
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
@@ -30,25 +30,23 @@ impl<'p> Packet for DisconnectPacket<'p> {
     const PACKET_TYPE: PacketType = PacketType::Disconnect;
 }
 impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
-        header: &FixedHeader,
-        mut reader: BodyReader<'_, 'p, R, B>,
-    ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+    fn decode(mut decoder: PacketDecoder<'p>) -> Result<Self, RxError> {
         trace!("decoding");
+        let header = decoder.header().clone();
 
         if header.flags() != 0 {
             error!("flags are not 0");
             return Err(RxError::MalformedPacket);
         }
 
-        let r = &mut reader;
+        let d = &mut decoder;
 
         let disconnect_reason_code = if header.remaining_len.size() == 0 {
             trace!("received minimal packet");
             ReasonCode::Success
         } else {
             trace!("reading disconnect reason code");
-            ReasonCode::read(r).await?
+            ReasonCode::read(d)?
         };
 
         if !matches!(
@@ -100,37 +98,37 @@ impl<'p> RxPacket<'p> for DisconnectPacket<'p> {
             0
         } else {
             trace!("reading properties length");
-            VarByteInt::read(r).await?.size()
+            VarByteInt::read(d)?.size()
         };
 
         trace!("properties length = {}", properties_length);
 
-        if r.remaining_len() != properties_length {
+        if d.remaining_len() != properties_length {
             error!("properties length is not equal to remaining packet length");
             return Err(RxError::MalformedPacket);
         }
 
-        while r.remaining_len() > 0 {
+        while d.remaining_len() > 0 {
             trace!(
                 "reading property type with remaining len = {}",
-                r.remaining_len()
+                d.remaining_len()
             );
-            let property_type = PropertyType::read(r).await?;
+            let property_type = PropertyType::read(d)?;
 
             trace!(
                 "reading property body of {:?} with remaining len = {}",
                 property_type,
-                r.remaining_len()
+                d.remaining_len()
             );
             #[rustfmt::skip]
             match property_type {
-                PropertyType::ReasonString => packet.reason_string.try_set(r).await?,
-                PropertyType::ServerReference => packet.server_reference.try_set(r).await?,
+                PropertyType::ReasonString => packet.reason_string.try_set(d)?,
+                PropertyType::ServerReference => packet.server_reference.try_set(d)?,
                 PropertyType::UserProperty => {
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
-                    let len = u16::read(r).await? as usize;
-                    r.skip(len).await?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
+                    let len = u16::read(d)? as usize;
+                    d.skip(len)?;
                 },
                 // Protocol error according to [MQTT-3.14.2-2]
                 PropertyType::SessionExpiryInterval => return Err(RxError::ProtocolError),

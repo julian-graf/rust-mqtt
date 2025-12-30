@@ -40,13 +40,10 @@ env_logger = "0.11.8"
 
 
 [features]
-default = ["v5", "alloc"]
+default = ["v5"]
 
 log = ["dep:log"]
 defmt = ["dep:defmt", "embedded-io-async/defmt"]
-
-bump = []
-alloc = []
 
 v3 = []
 v5 = []
