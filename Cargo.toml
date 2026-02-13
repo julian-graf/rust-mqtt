@@ -54,6 +54,8 @@ p256 = "0.13.2"
 [features]
 default = ["v5", "alloc"]
 
+discrete = []
+
 log = ["dep:log"]
 defmt = ["dep:defmt", "embedded-io-async/defmt"]
 

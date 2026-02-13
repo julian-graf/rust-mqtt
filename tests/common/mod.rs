@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use rust_mqtt::{
-    buffer::AllocBuffer,
+    discrete::AllocBuffer,
     client::{
         Client,
         options::{ConnectOptions, DisconnectOptions, RetainHandling, SubscriptionOptions},

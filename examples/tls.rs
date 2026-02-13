@@ -9,7 +9,7 @@ use p256::{
 use pem_parser::pem_to_der;
 use rand::rngs::OsRng;
 use rust_mqtt::{
-    buffer::*,
+    discrete::*,
     client::{
         Client,
         options::{ConnectOptions, DisconnectOptions},

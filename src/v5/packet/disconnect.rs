@@ -1,14 +1,13 @@
 #[cfg(test)]
 use crate::types::MqttString;
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     config::SessionExpiryInterval,
     eio::{Read, Write},
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
-        write::{Writable, wlen},
+        body::BodyReader, read::Readable, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::{ReasonCode, VarByteInt},

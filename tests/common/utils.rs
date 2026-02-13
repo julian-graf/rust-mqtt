@@ -4,7 +4,7 @@ use embedded_io_adapters::tokio_1::FromTokio;
 use log::{info, warn};
 use rust_mqtt::{
     Bytes,
-    buffer::AllocBuffer,
+    discrete::AllocBuffer,
     client::{
         Client, MqttError,
         event::{Event, Publish, Suback},

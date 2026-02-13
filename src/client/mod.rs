@@ -1,7 +1,7 @@
 //! Implements full client functionality with session and configuration handling and Quality of Service flows.
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     bytes::Bytes,
     client::{
         event::{Event, Puback, Publish, Pubrej, Suback},
@@ -9,8 +9,7 @@ use crate::{
         options::{
             ConnectOptions, DisconnectOptions, PublicationOptions, SubscriptionOptions,
             TopicReference,
-        },
-        raw::Raw,
+        }, raw::Raw,
     },
     config::{ClientConfig, MaximumPacketSize, ServerConfig, SessionExpiryInterval, SharedConfig},
     fmt::{debug, error, panic, unreachable, warn},

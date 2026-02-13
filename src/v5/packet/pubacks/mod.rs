@@ -5,13 +5,12 @@
 use core::marker::PhantomData;
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     eio::{Read, Write},
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
-        write::{Writable, wlen},
+        body::BodyReader, read::Readable, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::{ReasonCode, VarByteInt},

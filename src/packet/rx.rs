@@ -1,12 +1,13 @@
 use core::fmt;
 
+#[cfg(feature = "discrete")]
+use crate::io::body::BodyReader;
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     eio::Read,
     header::FixedHeader,
     io::{
-        err::{BodyReadError, ReadError},
-        read::BodyReader,
+        body::BodyReadError, err::ReadError
     },
     packet::Packet,
     v5::property::AtMostOncePropertyError,
@@ -14,16 +15,26 @@ use crate::{
 
 pub trait RxPacket<'p>: Packet + Sized {
     /// Receives a packet. Must check the fixed header for correctness.
+    #[cfg(feature = "discrete")]
     async fn receive<R: Read, B: BufferProvider<'p>>(
         header: &FixedHeader,
         reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>>;
+
+    /// Receives a packet. Must check the fixed header for correctness.
+    #[cfg(not(feature = "discrete"))]
+    async fn receive<R: Read>(
+        header: &FixedHeader,
+        reader: BodyReader<'_, 'p, R>,
+    ) -> Result<Self, RxError<R::Error>>;
 }
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum RxError<E, B> {
+pub enum RxError<E, #[cfg(feature = "discrete")] B> {
     Read(E),
+
+    #[cfg(feature = "discrete")]
     Buffer(B),
 
     /// Constant space somewhere is not enough, e.g. `Vec<ReasonCode, MAX_TOPIC_FILTERS>` in SUBACK

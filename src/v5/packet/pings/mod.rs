@@ -1,11 +1,11 @@
 use core::marker::PhantomData;
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     eio::{Read, Write},
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
-    io::{read::BodyReader, write::Writable},
+    io::{ body::BodyReader, write::Writable},
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::VarByteInt,
     v5::packet::pings::types::{PingPacketType, Req, Resp},

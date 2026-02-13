@@ -30,7 +30,7 @@ pub trait BufferProvider<'a> {
 mod bump {
     use core::slice;
 
-    use crate::buffer::BufferProvider;
+    use crate::discrete::BufferProvider;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -163,7 +163,7 @@ mod alloc {
     use alloc::boxed::Box;
     use alloc::vec;
 
-    use crate::buffer::BufferProvider;
+    use crate::discrete::BufferProvider;
 
     /// Allocates memory using the global allocator.
     #[derive(Debug)]
@@ -183,7 +183,7 @@ mod alloc {
 
     #[cfg(test)]
     mod unit {
-        use crate::buffer::{BufferProvider, alloc::AllocBuffer};
+        use crate::discrete::{BufferProvider, alloc::AllocBuffer};
         use tokio_test::assert_ok;
 
         #[test]

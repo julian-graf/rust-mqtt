@@ -1,10 +1,10 @@
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     config::{MaximumPacketSize, ReceiveMaximum, SessionExpiryInterval},
     eio::Read,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
-    io::read::{BodyReader, Readable},
+    io::{body::BodyReader, read::Readable},
     packet::{Packet, RxError, RxPacket},
     types::{ReasonCode, VarByteInt},
     v5::property::{

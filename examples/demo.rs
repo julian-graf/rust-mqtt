@@ -8,7 +8,7 @@ use log::{error, info};
 
 use rust_mqtt::{
     Bytes,
-    buffer::*,
+    discrete::*,
     client::{
         Client,
         event::{Event, Puback, Suback},

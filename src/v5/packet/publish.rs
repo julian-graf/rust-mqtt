@@ -1,15 +1,14 @@
 use heapless::Vec;
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     bytes::Bytes,
     client::options::TopicReference,
     eio::{Read, Write},
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable, Store},
-        write::{Writable, wlen},
+        body::BodyReader, read::{ Readable, Store}, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket, TxError, TxPacket},
     types::{IdentifiedQoS, MqttBinary, MqttString, QoS, TooLargeToEncode, TopicName, VarByteInt},

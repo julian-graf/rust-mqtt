@@ -2,12 +2,12 @@ use crate::{eio::Read, io::err::ReadError, types::VarByteInt};
 use tokio_test::assert_ok;
 
 #[cfg(feature = "alloc")]
-use crate::buffer::AllocBuffer;
+use crate::discrete::AllocBuffer;
 #[cfg(feature = "bump")]
-use crate::buffer::BumpBuffer;
+use crate::discrete::BumpBuffer;
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     header::FixedHeader,
     io::read::{BodyReader, Readable},
     packet::RxPacket,
@@ -82,7 +82,7 @@ fn create_buffer<'a>(buffer: &'a mut [u8]) -> impl BufferProvider<'a> {
 
 #[cfg(not(any(feature = "bump", feature = "alloc")))]
 mod buffer {
-    use crate::buffer::BufferProvider;
+    use crate::discrete::BufferProvider;
 
     pub struct FailingBuffer;
     impl<'a> BufferProvider<'a> for FailingBuffer {

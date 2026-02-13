@@ -3,13 +3,12 @@ use core::marker::PhantomData;
 use heapless::Vec;
 
 use crate::{
-    buffer::BufferProvider,
+    discrete::BufferProvider,
     eio::Read,
     fmt::{error, trace},
     header::{FixedHeader, PacketType},
     io::{
-        read::{BodyReader, Readable},
-        write::{Writable, wlen},
+        body::BodyReader, read::Readable, write::{Writable, wlen}
     },
     packet::{Packet, RxError, RxPacket},
     types::{ReasonCode, VarByteInt},
