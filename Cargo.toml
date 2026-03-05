@@ -40,7 +40,7 @@ tokio-test = "0.4.4"
 test-log = "0.2.19"
 log = "0.4.28"
 env_logger = "0.11.8"
-embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls.git", rev = "0348d4e15e31fd2666560c25bcf9601df625380a", default-features = false, features = [
+embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls.git", default-features = false, features = [
     "webpki",
     "std",
     "log",

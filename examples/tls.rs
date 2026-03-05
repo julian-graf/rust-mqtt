@@ -15,22 +15,22 @@ use rust_mqtt::{
         options::{ConnectOptions, DisconnectOptions},
     },
 };
-use signature::SignerMut;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
 use tokio::{net::TcpStream, time::sleep};
 
-// Crypto provider implementation from https://github.com/drogue-iot/embedded-tls/blob/71ae455ecba56a05fca4da206532912f7a4716fe/tests/rustpki_test.rs
+// Crypto provider implementation from https://github.com/drogue-iot/embedded-tls/blob/4249e6479c43f040863c565330b3e6248efb1291/tests/rustpki_test.rs
 
-#[derive(Default)]
-struct Provider {
+struct Provider<'a> {
     rng: OsRng,
-    verifier: CertVerifier<Aes128GcmSha256, SystemTime, 4096>,
+    client_key: &'a [u8],
+    client_cert: &'a [u8],
+    verifier: CertVerifier<'a, Aes128GcmSha256, SystemTime, 4096>,
 }
 
-impl CryptoProvider for Provider {
+impl<'a> CryptoProvider for Provider<'a> {
     type CipherSuite = Aes128GcmSha256;
     type Signature = DerSignature;
 
@@ -44,15 +44,18 @@ impl CryptoProvider for Provider {
 
     fn signer(
         &mut self,
-        key_der: &[u8],
-    ) -> Result<(impl SignerMut<Self::Signature>, SignatureScheme), TlsError> {
+    ) -> Result<(impl signature::SignerMut<Self::Signature>, SignatureScheme), TlsError> {
         let secret_key =
-            SecretKey::from_sec1_der(key_der).map_err(|_| TlsError::InvalidPrivateKey)?;
+            SecretKey::from_sec1_der(self.client_key).map_err(|_| TlsError::InvalidPrivateKey)?;
 
         Ok((
             SigningKey::from(&secret_key),
             SignatureScheme::EcdsaSecp256r1Sha256,
         ))
+    }
+
+    fn client_cert(&mut self) -> Option<Certificate<impl AsRef<[u8]>>> {
+        Some(Certificate::X509(self.client_cert))
     }
 }
 
@@ -77,11 +80,7 @@ async fn main() {
     let client_cert = pem_to_der(include_str!("./pki/client-cert.pem"));
     let client_key = pem_to_der(include_str!("./pki/client-key.pem"));
 
-    let config = TlsConfig::new()
-        .with_ca(Certificate::X509(&ca_cert))
-        .with_cert(Certificate::X509(&client_cert))
-        .with_priv_key(&client_key)
-        .with_server_name("localhost");
+    let config = TlsConfig::new().with_server_name("localhost");
 
     let mut record_read_buf = [0; 16384];
     let mut record_write_buf = [0; 16384];
@@ -90,7 +89,15 @@ async fn main() {
         TlsConnection::new(connection, &mut record_read_buf, &mut record_write_buf);
 
     tls_connection
-        .open(TlsContext::new(&config, Provider::default()))
+        .open(TlsContext::new(
+            &config,
+            Provider {
+                rng: OsRng,
+                client_key: &client_key,
+                client_cert: &client_cert,
+                verifier: CertVerifier::new(Certificate::X509(&ca_cert)),
+            },
+        ))
         .await
         .expect("error establishing TLS connection");
 
