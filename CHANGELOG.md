@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add request problem information support
 - Add reason string to incoming PUBACK, PUBREC, PUBREL, PUBCOMP, SUBACK, UNSUBACK
 - Detect protocol error when server sends user properties (only when `MAX_USER_PROPERTIES` > 0) or a reason string in the PUBACK, PUBREC, PUBREL, PUBCOMP, SUBACK and UNSUBACK packets
+- Use `NonZero<u16>` for topic alias values in `TopicReference`
+- Remove `From<TopicName>` for `TopicFilter` (a correct topic name can be an incorrect shared subscription filter)
+- Add explicit support for shared subscriptions
+- Prevent protocol error on shared subscriptions when shared subscriptions are not available
+- Prevent protocol error on wildcard subscriptions when wildcard subscriptions are not available
+- Prevent protocol error on subscription identifier being specified when subscription identifiers are not available
+- Prevent protocol error on exceedance of the server's maximum quality of service
+- Prevent protocol error on retained publications when retain is not available
+- Replace usage of `MqttError::InvalidTopicAlias` with `MqttError::UnsupportedByServer`
 
 ## 0.5.1 - 2026-04-10
 
