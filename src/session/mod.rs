@@ -7,6 +7,10 @@ use crate::types::PacketIdentifier;
 
 mod flight;
 
+pub struct NewSession {
+    
+}
+
 /// Session-associated information
 ///
 /// Client identifier is not stored here as it would lead to inconsistencies with the underyling allocation system.

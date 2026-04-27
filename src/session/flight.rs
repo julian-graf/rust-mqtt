@@ -11,6 +11,34 @@ pub struct InFlightPublish<S> {
     pub packet_identifier: PacketIdentifier,
     /// The state of the publication process.
     pub state: S,
+    /// The outgoing PUBACK/PUBREC/PUBREL/PUBCOMP packets are sent manually.
+    pub manual: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ClientPublishState {
+    /// PUBLISH has been sent, now waiting for PUBACK.
+    AwaitAck,
+    /// PUBLISH has been sent, now waiting for PUBREC.
+    AwaitRec,
+    /// PUBREC has been received, PUBREL will be sent manually. In non-manual flows, this step is skipped.
+    DueRel,
+    /// PUBREL has been sent, now waiting for PUBCOMP.
+    AwaitComp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ServerPublishState {
+    /// PUBLISH has been received. PUBACK will be sent manually. In non-manual flows, this step is skipped.
+    DueAck,
+    /// PUBLISH has been received. PUBREC will be sent manually. In non-manual flows, this step is skipped.
+    DueRec,
+    /// PUBREC has been sent, now waiting for PUBREL.
+    AwaitRel,
+    /// PUBREL has been received, PUBCOMP will be sent manually. In non-manual flows, this step is skipped.
+    DueComp,
 }
 
 /// The state of an incomplete [`QoS::AtLeastOnce`] or [`QoS::ExactlyOnce`] publication by the client.
