@@ -1,6 +1,6 @@
 //! Contains utilities for session management.
 
-pub use flight::{CPublishFlightState, InFlightPublish, SPublishFlightState};
+pub use flight::{ClientPublishState, InFlightPublish, ServerPublishState};
 use heapless::Vec;
 
 use crate::types::PacketIdentifier;
@@ -14,9 +14,9 @@ mod flight;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Session<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize> {
     /// The currently in-flight outgoing publications.
-    pub pending_client_publishes: Vec<InFlightPublish<CPublishFlightState>, SEND_MAXIMUM>,
+    pub pending_client_publishes: Vec<InFlightPublish<ClientPublishState>, SEND_MAXIMUM>,
     /// The currently in-flight incoming publications.
-    pub pending_server_publishes: Vec<InFlightPublish<SPublishFlightState>, RECEIVE_MAXIMUM>,
+    pub pending_server_publishes: Vec<InFlightPublish<ServerPublishState>, RECEIVE_MAXIMUM>,
 }
 
 impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
@@ -24,21 +24,27 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
 {
     /// Returns whether the packet identifier is currently in-flight in a client->server publication process.
     #[must_use]
-    pub fn is_used_cpublish_packet_identifier(&self, packet_identifier: PacketIdentifier) -> bool {
-        self.cpublish_flight_state(packet_identifier).is_some()
+    pub fn is_used_client_publish_packet_identifier(
+        &self,
+        packet_identifier: PacketIdentifier,
+    ) -> bool {
+        self.client_publish_state(packet_identifier).is_some()
     }
     /// Returns whether the packet identifier is currently in-flight in a server->client publication process.
     #[must_use]
-    pub fn is_used_spublish_packet_identifier(&self, packet_identifier: PacketIdentifier) -> bool {
-        self.spublish_flight_state(packet_identifier).is_some()
+    pub fn is_used_server_publish_packet_identifier(
+        &self,
+        packet_identifier: PacketIdentifier,
+    ) -> bool {
+        self.server_publish_state(packet_identifier).is_some()
     }
 
     /// Returns the state of the publication of the packet identifier if the packet identifier is in-flight in an outgoing publication.
     #[must_use]
-    pub fn cpublish_flight_state(
+    pub fn client_publish_state(
         &self,
         packet_identifier: PacketIdentifier,
-    ) -> Option<CPublishFlightState> {
+    ) -> Option<ClientPublishState> {
         self.pending_client_publishes
             .iter()
             .find(|f| f.packet_identifier == packet_identifier)
@@ -46,10 +52,10 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     }
     /// Returns the state of the publication of the packet identifier if the packet identifier is in-flight in an incoming publication.
     #[must_use]
-    pub fn spublish_flight_state(
+    pub fn server_publish_state(
         &self,
         packet_identifier: PacketIdentifier,
-    ) -> Option<SPublishFlightState> {
+    ) -> Option<ServerPublishState> {
         self.pending_server_publishes
             .iter()
             .find(|f| f.packet_identifier == packet_identifier)
@@ -58,22 +64,22 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
 
     /// Returns the amount of currently in-flight outgoing publications.
     #[must_use]
-    pub fn in_flight_cpublishes(&self) -> u16 {
+    pub fn in_flight_client_publishes(&self) -> u16 {
         self.pending_client_publishes.len() as u16
     }
     /// Returns the amount of currently in-flight incoming publications.
     #[must_use]
-    pub fn in_flight_spublishes(&self) -> u16 {
+    pub fn in_flight_server_publishes(&self) -> u16 {
         self.pending_server_publishes.len() as u16
     }
     /// Returns the amount of slots for outgoing publications.
     #[must_use]
-    pub fn cpublish_remaining_capacity(&self) -> u16 {
+    pub fn client_publish_remaining_capacity(&self) -> u16 {
         (self.pending_client_publishes.capacity() - self.pending_client_publishes.len()) as u16
     }
     /// Returns the amount of slots for incoming publications.
     #[must_use]
-    pub fn spublish_remaining_capacity(&self) -> u16 {
+    pub fn server_publish_remaining_capacity(&self) -> u16 {
         (self.pending_server_publishes.capacity() - self.pending_server_publishes.len()) as u16
     }
 
@@ -84,7 +90,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     pub(crate) unsafe fn r#await(
         &mut self,
         packet_identifier: PacketIdentifier,
-        state: CPublishFlightState,
+        state: ClientPublishState,
     ) {
         // Safety: self.pending_client_publishes has free capacity.
         unsafe {
@@ -102,7 +108,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     /// `self.pending_client_publishes` has free capacity.
     pub(crate) unsafe fn await_puback(&mut self, packet_identifier: PacketIdentifier) {
         // Safety: self.pending_client_publishes has free capacity.
-        unsafe { self.r#await(packet_identifier, CPublishFlightState::AwaitingPuback) };
+        unsafe { self.r#await(packet_identifier, ClientPublishState::AwaitAck) };
     }
     /// Adds an entry to await a PUBREC packet. Assumes the packet identifier has no entry currently.
     ///
@@ -110,7 +116,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     /// `self.pending_client_publishes` has free capacity.
     pub(crate) unsafe fn await_pubrec(&mut self, packet_identifier: PacketIdentifier) {
         // Safety: self.pending_client_publishes has free capacity.
-        unsafe { self.r#await(packet_identifier, CPublishFlightState::AwaitingPubrec) };
+        unsafe { self.r#await(packet_identifier, ClientPublishState::AwaitRec) };
     }
     /// Adds an entry to await a PUBREL packet. Assumes the packet identifier has no entry currently.
     ///
@@ -122,7 +128,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
             self.pending_server_publishes
                 .push(InFlightPublish {
                     packet_identifier,
-                    state: SPublishFlightState::AwaitingPubrel,
+                    state: ServerPublishState::AwaitRel,
                 })
                 .unwrap_unchecked();
         }
@@ -133,13 +139,13 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     /// `self.pending_client_publishes` has free capacity.
     pub(crate) unsafe fn await_pubcomp(&mut self, packet_identifier: PacketIdentifier) {
         // Safety: self.pending_client_publishes has free capacity.
-        unsafe { self.r#await(packet_identifier, CPublishFlightState::AwaitingPubcomp) };
+        unsafe { self.r#await(packet_identifier, ClientPublishState::AwaitComp) };
     }
 
     pub(crate) fn remove_cpublish(
         &mut self,
         packet_identifier: PacketIdentifier,
-    ) -> Option<CPublishFlightState> {
+    ) -> Option<ClientPublishState> {
         self.pending_client_publishes
             .iter()
             .position(|s| s.packet_identifier == packet_identifier)
@@ -151,7 +157,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     pub(crate) fn remove_spublish(
         &mut self,
         packet_identifier: PacketIdentifier,
-    ) -> Option<SPublishFlightState> {
+    ) -> Option<ServerPublishState> {
         self.pending_server_publishes
             .iter()
             .position(|s| s.packet_identifier == packet_identifier)

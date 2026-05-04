@@ -20,7 +20,7 @@ use crate::{
     header::{FixedHeader, PacketType},
     io::Transport,
     packet::{Packet, TxPacket},
-    session::{CPublishFlightState, SPublishFlightState, Session},
+    session::{ClientPublishState, ServerPublishState, Session},
     types::{
         IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, PacketIdentifier, QoS, ReasonCode,
         SubscriptionFilter, TopicFilter, TopicName, VarByteInt,
@@ -155,12 +155,12 @@ impl<
     /// Returns the amount of publications the client is allowed to make according to the server's
     /// receive maximum. Does not account local space for storing publication state.
     fn remaining_send_quota(&self) -> u16 {
-        self.server_config.receive_maximum.get() - self.session.in_flight_cpublishes()
+        self.server_config.receive_maximum.get() - self.session.in_flight_client_publishes()
     }
 
     fn is_packet_identifier_used(&self, packet_identifier: PacketIdentifier) -> bool {
         self.session
-            .is_used_cpublish_packet_identifier(packet_identifier)
+            .is_used_client_publish_packet_identifier(packet_identifier)
             || self.pending_suback.contains(&packet_identifier)
             || self.pending_unsuback.contains(&packet_identifier)
     }
@@ -772,7 +772,7 @@ impl<
                 info!("server receive maximum reached");
                 return Err(MqttError::SendQuotaExceeded);
             }
-            if self.session.cpublish_remaining_capacity() == 0 {
+            if self.session.client_publish_remaining_capacity() == 0 {
                 info!("client maximum concurrent publications reached");
                 return Err(MqttError::SessionBuffer);
             }
@@ -927,29 +927,29 @@ impl<
             return Err(MqttError::UnsupportedByServer);
         }
 
-        let identified_qos = match self.session.cpublish_flight_state(packet_identifier) {
-            Some(CPublishFlightState::AwaitingPuback) if options.qos == QoS::AtLeastOnce => {
+        let identified_qos = match self.session.client_publish_state(packet_identifier) {
+            Some(ClientPublishState::AwaitAck) if options.qos == QoS::AtLeastOnce => {
                 IdentifiedQoS::AtLeastOnce(packet_identifier)
             }
-            Some(CPublishFlightState::AwaitingPubrec) if options.qos == QoS::ExactlyOnce => {
+            Some(ClientPublishState::AwaitRec) if options.qos == QoS::ExactlyOnce => {
                 IdentifiedQoS::ExactlyOnce(packet_identifier)
             }
 
-            Some(CPublishFlightState::AwaitingPuback) => {
+            Some(ClientPublishState::AwaitAck) => {
                 warn!(
                     "packet identifier {} was originally published with QoS 1",
                     packet_identifier
                 );
                 return Err(MqttError::RepublishQoSNotMatching);
             }
-            Some(CPublishFlightState::AwaitingPubrec) => {
+            Some(ClientPublishState::AwaitRec) => {
                 warn!(
                     "packet identifier {} was originally published with QoS 2",
                     packet_identifier
                 );
                 return Err(MqttError::RepublishQoSNotMatching);
             }
-            Some(CPublishFlightState::AwaitingPubcomp) => {
+            Some(ClientPublishState::AwaitComp) => {
                 warn!(
                     "packet identifier {} is already awaiting PUBCOMP",
                     packet_identifier
@@ -1028,7 +1028,7 @@ impl<
             .session
             .pending_client_publishes
             .iter()
-            .filter(|s| s.state == CPublishFlightState::AwaitingPubcomp)
+            .filter(|s| s.state == ClientPublishState::AwaitComp)
             .map(|p| p.packet_identifier)
         {
             let pubrel = PubrelPacket::<0>::new(packet_identifier, ReasonCode::Success);
@@ -1404,9 +1404,9 @@ impl<
                     IdentifiedQoS::ExactlyOnce(pid) => {
                         debug!("received QoS 2 publication with packet identifier {}", pid);
 
-                        let event = match self.session.spublish_flight_state(pid) {
+                        let event = match self.session.server_publish_state(pid) {
                             Some(SPublishFlightState::AwaitingPubrel) => Event::Duplicate,
-                            None if self.session.spublish_remaining_capacity() > 0 => {
+                            None if self.session.server_publish_remaining_capacity() > 0 => {
                                 // Safety: `spublish_remaining_capacity()` > 0 confirms that there is space.
                                 unsafe { self.session.await_pubrel(pid) };
                                 Event::Publish(publish)
@@ -1453,19 +1453,19 @@ impl<
                 let reason_code = puback.reason_code;
 
                 match self.session.remove_cpublish(pid) {
-                    Some(CPublishFlightState::AwaitingPuback) if reason_code.is_success() => {
+                    Some(ClientPublishState::AwaitAck) if reason_code.is_success() => {
                         debug!("publication with packet identifier {} complete", pid);
 
                         Event::PublishAcknowledged(Puback::from(puback))
                     }
-                    Some(CPublishFlightState::AwaitingPuback) => {
+                    Some(ClientPublishState::AwaitAck) => {
                         debug!("publication with packet identifier {} aborted", pid);
 
                         Event::PublishRejected(Pubrej::from(puback))
                     }
                     Some(
-                        s @ CPublishFlightState::AwaitingPubrec
-                        | s @ CPublishFlightState::AwaitingPubcomp,
+                        s @ ClientPublishState::AwaitRec
+                        | s @ ClientPublishState::AwaitComp,
                     ) => {
                         warn!("packet identifier {} in PUBACK is actually {:?}", pid, s);
 
@@ -1506,7 +1506,7 @@ impl<
                 let reason_code = pubrec.reason_code;
 
                 match self.session.remove_cpublish(pid) {
-                    Some(CPublishFlightState::AwaitingPubrec) if reason_code.is_success() => {
+                    Some(ClientPublishState::AwaitRec) if reason_code.is_success() => {
                         // Safety: Session::remove_cpublish returning Some and therefore successfully
                         // removing a cpublish frees space to add a new in flight entry.
                         unsafe { self.session.await_pubcomp(pid) };
@@ -1523,7 +1523,7 @@ impl<
 
                         Event::PublishReceived(Puback::from(pubrec))
                     }
-                    Some(CPublishFlightState::AwaitingPubrec) => {
+                    Some(ClientPublishState::AwaitRec) => {
                         // After receiving an erroneous PUBREC, we have to treat any subsequent PUBLISH packet
                         // with the same packet identifier as a new message. This is achieved by already having
                         // removed the packet identifier's in flight entry.
@@ -1533,8 +1533,8 @@ impl<
                         Event::PublishRejected(Pubrej::from(pubrec))
                     }
                     Some(
-                        s @ CPublishFlightState::AwaitingPuback
-                        | s @ CPublishFlightState::AwaitingPubcomp,
+                        s @ ClientPublishState::AwaitAck
+                        | s @ ClientPublishState::AwaitComp,
                     ) => {
                         warn!("packet identifier {} in PUBREC is actually {:?}", pid, s);
 
@@ -1643,19 +1643,19 @@ impl<
                 let reason_code = pubcomp.reason_code;
 
                 match self.session.remove_cpublish(pid) {
-                    Some(CPublishFlightState::AwaitingPubcomp) if reason_code.is_success() => {
+                    Some(ClientPublishState::AwaitComp) if reason_code.is_success() => {
                         debug!("publication with packet identifier {} complete", pid);
 
                         Event::PublishComplete(Puback::from(pubcomp))
                     }
-                    Some(CPublishFlightState::AwaitingPubcomp) => {
+                    Some(ClientPublishState::AwaitComp) => {
                         debug!("publication with packet identifier {} aborted", pid);
 
                         Event::PublishRejected(Pubrej::from(pubcomp))
                     }
                     Some(
-                        s @ CPublishFlightState::AwaitingPuback
-                        | s @ CPublishFlightState::AwaitingPubrec,
+                        s @ ClientPublishState::AwaitAck
+                        | s @ ClientPublishState::AwaitRec,
                     ) => {
                         warn!("packet identifier {} in PUBCOMP is actually {:?}", pid, s);
 
