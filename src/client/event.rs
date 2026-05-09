@@ -154,6 +154,8 @@ pub struct Suback<'s, const MAX_USER_PROPERTIES: usize> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
 {
+    pub manual_ack: bool,
+
     /// The DUP flag in the PUBLISH packet. If set to false, it indicates that this is the first occasion
     /// the server has attempted to send this publication.
     pub dup: bool,
@@ -215,6 +217,7 @@ pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Puback<'p, const MAX_USER_PROPERTIES: usize> {
+    pub manual_ack: bool,
     /// Packet identifier of the acknowledged PUBLISH packet.
     pub packet_identifier: PacketIdentifier,
     /// Reason code of this state in the publication process
@@ -226,13 +229,15 @@ pub struct Puback<'p, const MAX_USER_PROPERTIES: usize> {
     pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
 }
 
-impl<'p, T, const MAX_USER_PROPERTIES: usize> From<GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>>
-    for Puback<'p, MAX_USER_PROPERTIES>
-{
-    fn from(packet: GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>) -> Self {
+impl<'p, const MAX_USER_PROPERTIES: usize> Puback<'p, MAX_USER_PROPERTIES> {
+    pub(crate) fn new<T>(
+        packet: GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>,
+        manual_ack: bool,
+    ) -> Self {
         debug_assert!(packet.reason_code.is_success());
 
         Self {
+            manual_ack,
             packet_identifier: packet.packet_identifier,
             reason_code: packet.reason_code,
             reason_string: packet.reason_string.map(Property::into_inner),
