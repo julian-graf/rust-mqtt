@@ -5,14 +5,11 @@ use heapless::Vec;
 
 use crate::{
     session::{
-        handle::{FreeHandle, InboundHandle, OutboundHandle},
+        handle::{FreeHandle, InboundHandle, OutboundHandle, SubHandle, UnsubHandle},
         state::{LocalPublishState, PeerPublishState},
         state_machine::{Event, Response, StateError},
     },
-    types::{
-        IdentifiedQoS, PacketIdentifier,
-        ReasonCode,
-    },
+    types::{IdentifiedQoS, PacketIdentifier, ReasonCode},
 };
 
 pub(crate) mod handle;
@@ -24,51 +21,26 @@ pub(crate) mod state_machine;
 /// Client identifier is not stored here as it would lead to inconsistencies with the underyling allocation system.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Session<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize> {
+pub struct Session<
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub subs: Vec<PacketIdentifier, SUBSCRIBE_MAXIMUM>,
+    pub unsubs: Vec<PacketIdentifier, SUBSCRIBE_MAXIMUM>,
+
     /// The currently in-flight incoming publications.
     pub inbound_publishes: Vec<(PacketIdentifier, PeerPublishState), RECEIVE_MAXIMUM>,
     /// The currently in-flight outgoing publications.
     pub outbound_publishes: Vec<(PacketIdentifier, LocalPublishState), SEND_MAXIMUM>,
 }
 
-impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>
+impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
-    pub fn inbound_handle(
+    pub fn free_handle(
         &mut self,
-        packet_identifier: PacketIdentifier,
-    ) -> Option<InboundHandle<'_, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
-        self.inbound_publishes
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, e)| e.0 == packet_identifier)
-            .map(|(i, (_, state))| InboundHandle {
-                session: self,
-                i,
-                packet_identifier,
-                state,
-            })
-    }
-    pub fn outbound_handle(
-        &mut self,
-        packet_identifier: PacketIdentifier,
-    ) -> Option<OutboundHandle<'_, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
-        self.outbound_publishes
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, e)| e.0 == packet_identifier)
-            .map(|(i, (_, state))| OutboundHandle {
-                session: self,
-                i,
-                packet_identifier,
-                state,
-            })
-    }
-    pub fn handle_sub() {}
-    pub fn handle_unsub() {}
-    pub fn free_handle(&mut self) -> Option<FreeHandle<'_, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+    ) -> Option<FreeHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
         if RECEIVE_MAXIMUM == usize::from(u16::MAX) && !self.available_outbound_capacity() {
             return None;
         }
@@ -86,10 +58,68 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
             packet_identifier,
         });
     }
+    pub fn sub_handle(
+        &mut self,
+        packet_identifier: PacketIdentifier,
+    ) -> Option<SubHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+        self.subs
+            .iter()
+            .position(|&p| p == packet_identifier)
+            .map(|i| SubHandle {
+                session: self,
+                i,
+                packet_identifier,
+            })
+    }
+    pub fn unsub_handle(
+        &mut self,
+        packet_identifier: PacketIdentifier,
+    ) -> Option<UnsubHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+        self.unsubs
+            .iter()
+            .position(|&p| p == packet_identifier)
+            .map(|i| UnsubHandle {
+                session: self,
+                i,
+                packet_identifier,
+            })
+    }
+    pub fn inbound_handle(
+        &mut self,
+        packet_identifier: PacketIdentifier,
+    ) -> Option<InboundHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+        self.inbound_publishes
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, e)| e.0 == packet_identifier)
+            .map(|(i, (_, state))| InboundHandle {
+                session: self,
+                i,
+                packet_identifier,
+                state,
+            })
+    }
+    pub fn outbound_handle(
+        &mut self,
+        packet_identifier: PacketIdentifier,
+    ) -> Option<OutboundHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+        self.outbound_publishes
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, e)| e.0 == packet_identifier)
+            .map(|(i, (_, state))| OutboundHandle {
+                session: self,
+                i,
+                packet_identifier,
+                state,
+            })
+    }
 
     pub(crate) fn outbound_iter(
         &mut self,
-    ) -> Option<OutboundHandle<'_, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
+    ) -> Option<OutboundHandle<'_, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>> {
         self.outbound_publishes
             .first()
             .map(|(p, s)| (*p, *s))
@@ -177,15 +207,19 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     }
 
     pub fn clear(&mut self) {
+        self.subs.clear();
+        self.unsubs.clear();
         self.inbound_publishes.clear();
         self.outbound_publishes.clear();
     }
 }
 
-impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>
+impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
     pub(crate) fn reconnect(&mut self) {
+        self.subs.clear();
+        self.unsubs.clear();
         for (_, s) in self.inbound_publishes.iter_mut() {
             *s = s.reconnected();
         }
@@ -284,35 +318,19 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     }
 }
 
-impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>
+impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
     pub(crate) fn outbound_publish(
         &mut self,
         identified_qos: IdentifiedQoS,
-        manual: bool,
     ) -> Result<(), StateError> {
         match identified_qos {
             IdentifiedQoS::AtMostOnce => Ok(()),
             IdentifiedQoS::AtLeastOnce(pid) | IdentifiedQoS::ExactlyOnce(pid) => self
                 .outbound_handle(pid)
-                .map(|mut h| h.outbound_publish(identified_qos.into(), manual))
-                .unwrap_or_else(|| {
-                    if self.available_outbound_capacity() {
-                        match identified_qos {
-                            IdentifiedQoS::AtMostOnce => unreachable!(),
-                            IdentifiedQoS::AtLeastOnce(_) => {
-                                self.schedule_outbound(pid, LocalPublishState::AwaitAck)
-                            }
-                            IdentifiedQoS::ExactlyOnce(_) => {
-                                self.schedule_outbound(pid, LocalPublishState::AwaitRec(manual))
-                            }
-                        }
-                        Ok(())
-                    } else {
-                        Err(StateError::NoCapacity)
-                    }
-                }),
+                .map(|mut h| h.outbound_publish(identified_qos.into()))
+                .unwrap_or(Err(StateError::NoCapacity)),
         }
     }
 
@@ -365,7 +383,7 @@ mod unit {
 
     use crate::{
         session::{Event, Response, Session, state_machine::StateError},
-        types::{IdentifiedQoS, PacketIdentifier, ReasonCode},
+        types::{IdentifiedQoS, PacketIdentifier, QoS, ReasonCode},
     };
 
     macro_rules! sm_test {
@@ -375,7 +393,7 @@ mod unit {
         ) => {
             #[test]
             fn $test_name() {
-                let mut sm = crate::session::Session::<10, 10>::default();
+                let mut sm = crate::session::Session::<10, 10, 10>::default();
                 let pid = crate::types::PacketIdentifier::ONE;
 
                 sm_test!(@munch, 1, sm, pid, $($steps)*);
@@ -474,7 +492,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos1() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         let mut pid = PacketIdentifier::ONE;
         let mut pids = Vec::new();
@@ -594,7 +612,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos1_auto_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
@@ -714,7 +732,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos1_manual_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
@@ -831,7 +849,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos2_auto() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         let mut pid = PacketIdentifier::ONE;
         let mut pids = Vec::new();
@@ -905,7 +923,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos2_manual() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         let mut pid = PacketIdentifier::ONE;
         let mut pids = Vec::new();
@@ -1013,7 +1031,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos2_auto_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
@@ -1158,7 +1176,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos2_manual_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
@@ -1397,7 +1415,7 @@ mod unit {
     #[test_log::test]
     #[test]
     fn inbound_qos2_error_abort() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
@@ -1432,164 +1450,22 @@ mod unit {
     #[test_log::test]
     #[test]
     fn outbound_qos1() {
-        fn helper(manual: bool) {
-            let mut sm = Session::<10, 10>::default();
-
-            let mut pid = PacketIdentifier::ONE;
-            let mut pids = Vec::new();
-
-            loop {
-                let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(pid), manual);
-
-                if let Err(e) = r {
-                    assert_eq!(e, StateError::NoCapacity);
-                } else {
-                    pids.push(pid);
-                }
-
-                pid = pid.next();
-                if pid == PacketIdentifier::ONE {
-                    break;
-                }
-            }
-
-            // Republish should be allowed
-            sm.reconnect();
-            for pid in pids.iter().copied() {
-                let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(pid), manual);
-                assert_eq!(r, Ok(()));
-            }
-
-            // Republish with other manual setting should be allowed
-            sm.reconnect();
-            for pid in pids.iter().copied() {
-                let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(pid), !manual);
-                assert_eq!(r, Ok(()));
-            }
-
-            // Invalid server actions should lead to disconnect
-            for pid in pids.iter().copied() {
-                let (r, e) = sm.inbound_pubrec(pid, ReasonCode::Success);
-                assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-                assert_eq!(e, Event::ServerError);
-                let (r, e) = sm.inbound_pubcomp(pid, ReasonCode::Success);
-                assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-                assert_eq!(e, Event::ServerError);
-            }
-
-            // Complete the publication
-            for pid in pids.iter().copied() {
-                let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
-                assert_eq!(r, Response::None);
-                assert_eq!(e, Event::Acknowledged);
-            }
-
-            assert!(sm.outbound_publishes.is_empty());
-        }
-
-        // Outbound At Most Once should work identically whether manual is set or not as PUBACK is only received
-        helper(true);
-        helper(false);
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos1_full() {
-        fn helper(manual: bool) {
-            let mut sm = Session::<10, 10>::default();
-
-            const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-            let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(PID), manual);
-            assert_eq!(r, Ok(()));
-
-            assert!(sm.inbound_publishes.is_empty());
-
-            // Invalid client & server actions should not be allowed
-            let r = sm.outbound_puback(PID);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-            let r = sm.outbound_pubrec(PID);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-            let r = sm.outbound_pubrel(PID);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
-            let r = sm.outbound_pubcomp(PID);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-            let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-
-            let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-            assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-            assert_eq!(e, Event::Ignored);
-            let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-            assert_eq!(r, Response::None);
-            assert_eq!(e, Event::Ignored);
-
-            let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-
-            // Complete the handshake
-            let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-            assert_eq!(r, Response::None);
-            assert_eq!(e, Event::Acknowledged);
-
-            assert!(sm.inbound_publishes.is_empty());
-            assert!(sm.outbound_publishes.is_empty());
-        }
-
-        helper(false);
-        helper(true);
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos1_error_reject() {
-        fn helper(manual: bool) {
-            let mut sm = Session::<10, 10>::default();
-
-            const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-            let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(PID), manual);
-            assert_eq!(r, Ok(()));
-
-            assert!(sm.inbound_publishes.is_empty());
-
-            // Reject the publication
-            let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-            assert_eq!(r, Response::None);
-            assert_eq!(e, Event::Rejected);
-
-            assert!(sm.inbound_publishes.is_empty());
-            assert!(sm.outbound_publishes.is_empty());
-        }
-
-        helper(false);
-        helper(true);
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos2_auto() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         let mut pid = PacketIdentifier::ONE;
         let mut pids = Vec::new();
 
         loop {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), false);
-
-            if let Err(e) = r {
-                assert_eq!(e, StateError::NoCapacity);
+            if let Some(h) = sm.free_handle() {
+                let pid = h.packet_identifier;
+                if let Err(e) = h.outbound_publish(QoS::AtLeastOnce, false) {
+                    assert_eq!(e, StateError::NoCapacity);
+                    break;
+                } else {
+                    pids.push(pid);
+                }
             } else {
-                pids.push(pid);
+                break;
             }
 
             pid = pid.next();
@@ -1601,7 +1477,135 @@ mod unit {
         // Republish should be allowed
         sm.reconnect();
         for pid in pids.iter().copied() {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), false);
+            let r = sm.outbound_publish(IdentifiedQoS::AtLeastOnce(pid));
+            assert_eq!(r, Ok(()));
+        }
+
+        // Invalid server actions should lead to disconnect
+        for pid in pids.iter().copied() {
+            let (r, e) = sm.inbound_pubrec(pid, ReasonCode::Success);
+            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+            assert_eq!(e, Event::ServerError);
+            let (r, e) = sm.inbound_pubcomp(pid, ReasonCode::Success);
+            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+            assert_eq!(e, Event::ServerError);
+        }
+
+        // Complete the publication
+        for pid in pids.iter().copied() {
+            let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
+            assert_eq!(r, Response::None);
+            assert_eq!(e, Event::Acknowledged);
+        }
+
+        assert!(sm.outbound_publishes.is_empty());
+    }
+
+    #[test_log::test]
+    #[test]
+    fn outbound_qos1_full() {
+        let mut sm = Session::<10, 10, 10>::default();
+
+        const PID: PacketIdentifier = PacketIdentifier::ONE;
+
+        let r = sm
+            .free_handle()
+            .unwrap()
+            .outbound_publish(QoS::AtLeastOnce, false);
+        assert_eq!(r, Ok(()));
+
+        assert!(sm.inbound_publishes.is_empty());
+
+        // Invalid client & server actions should not be allowed
+        let r = sm.outbound_puback(PID);
+        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+        let r = sm.outbound_pubrec(PID);
+        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+        let r = sm.outbound_pubrel(PID);
+        assert_eq!(r, Err(StateError::MismatchedQoS));
+        let r = sm.outbound_pubcomp(PID);
+        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+
+        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
+        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+        assert_eq!(e, Event::ServerError);
+        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
+        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+        assert_eq!(e, Event::ServerError);
+
+        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
+        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
+        assert_eq!(e, Event::Ignored);
+        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
+        assert_eq!(r, Response::None);
+        assert_eq!(e, Event::Ignored);
+
+        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
+        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+        assert_eq!(e, Event::ServerError);
+        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
+        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
+        assert_eq!(e, Event::ServerError);
+
+        // Complete the handshake
+        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
+        assert_eq!(r, Response::None);
+        assert_eq!(e, Event::Acknowledged);
+
+        assert!(sm.inbound_publishes.is_empty());
+        assert!(sm.outbound_publishes.is_empty());
+    }
+
+    #[test_log::test]
+    #[test]
+    fn outbound_qos1_error_reject() {
+        let mut sm = Session::<10, 10, 10>::default();
+
+        const PID: PacketIdentifier = PacketIdentifier::ONE;
+
+        let r = sm
+            .free_handle()
+            .unwrap()
+            .outbound_publish(QoS::AtLeastOnce, false);
+        assert_eq!(r, Ok(()));
+
+        assert!(sm.inbound_publishes.is_empty());
+
+        // Reject the publication
+        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
+        assert_eq!(r, Response::None);
+        assert_eq!(e, Event::Rejected);
+
+        assert!(sm.inbound_publishes.is_empty());
+        assert!(sm.outbound_publishes.is_empty());
+    }
+
+    #[test_log::test]
+    #[test]
+    fn outbound_qos2_auto() {
+        let mut sm = Session::<10, 10, 10>::default();
+
+        let mut pid = PacketIdentifier::ONE;
+        let mut pids = Vec::new();
+
+        loop {
+            if let Some(h) = sm.free_handle() {
+                let pid = h.packet_identifier;
+                if let Err(e) = h.outbound_publish(QoS::ExactlyOnce, false) {
+                    assert_eq!(e, StateError::NoCapacity);
+                    break;
+                } else {
+                    pids.push(pid);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Republish should be allowed
+        sm.reconnect();
+        for pid in pids.iter().copied() {
+            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid));
             assert_eq!(r, Ok(()));
         }
 
@@ -1634,7 +1638,7 @@ mod unit {
 
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), false);
+            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid));
             assert_eq!(r, Err(StateError::MismatchedHandshakeState));
         }
 
@@ -1651,22 +1655,21 @@ mod unit {
     #[test_log::test]
     #[test]
     fn outbound_qos2_manual() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         let mut pid = PacketIdentifier::ONE;
         let mut pids = Vec::new();
 
         loop {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), true);
-
-            if let Err(e) = r {
-                assert_eq!(e, StateError::NoCapacity);
+            if let Some(h) = sm.free_handle() {
+                let pid = h.packet_identifier;
+                if let Err(e) = h.outbound_publish(QoS::ExactlyOnce, true) {
+                    assert_eq!(e, StateError::NoCapacity);
+                    break;
+                } else {
+                    pids.push(pid);
+                }
             } else {
-                pids.push(pid);
-            }
-
-            pid = pid.next();
-            if pid == PacketIdentifier::ONE {
                 break;
             }
         }
@@ -1674,7 +1677,7 @@ mod unit {
         // Republish should be allowed
         sm.reconnect();
         for pid in pids.iter().copied() {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), true);
+            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid));
             assert_eq!(r, Ok(()));
         }
 
@@ -1710,7 +1713,7 @@ mod unit {
 
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), true);
+            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid));
             assert_eq!(r, Err(StateError::MismatchedHandshakeState));
         }
 
@@ -1732,7 +1735,7 @@ mod unit {
 
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
-            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid), true);
+            let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(pid));
             assert_eq!(r, Err(StateError::MismatchedHandshakeState));
         }
 
@@ -1749,11 +1752,14 @@ mod unit {
     #[test_log::test]
     #[test]
     fn outbound_qos2_auto_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), false);
+        let r = sm
+            .free_handle()
+            .unwrap()
+            .outbound_publish(QoS::ExactlyOnce, false);
         assert_eq!(r, Ok(()));
 
         assert!(sm.inbound_publishes.is_empty());
@@ -1793,7 +1799,7 @@ mod unit {
 
         // Republish should be allowed
         sm.reconnect();
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), false);
+        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID));
         assert_eq!(r, Ok(()));
 
         assert!(sm.inbound_publishes.is_empty());
@@ -1870,7 +1876,7 @@ mod unit {
         assert!(sm.inbound_publishes.is_empty());
 
         // Republish should not be allowed after sending PUBREL
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), false);
+        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID));
         assert_eq!(r, Err(StateError::MismatchedHandshakeState));
 
         assert!(sm.inbound_publishes.is_empty());
@@ -1918,11 +1924,14 @@ mod unit {
     #[test_log::test]
     #[test]
     fn outbound_qos2_manual_full() {
-        let mut sm = Session::<10, 10>::default();
+        let mut sm = Session::<10, 10, 10>::default();
 
         const PID: PacketIdentifier = PacketIdentifier::ONE;
 
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), true);
+        let r = sm
+            .free_handle()
+            .unwrap()
+            .outbound_publish(QoS::ExactlyOnce, true);
         assert_eq!(r, Ok(()));
 
         assert!(sm.inbound_publishes.is_empty());
@@ -1962,7 +1971,7 @@ mod unit {
 
         // Republish should be allowed
         sm.reconnect();
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), true);
+        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID));
         assert_eq!(r, Ok(()));
 
         assert!(sm.inbound_publishes.is_empty());
@@ -2048,7 +2057,7 @@ mod unit {
         assert!(sm.inbound_publishes.is_empty());
 
         // Republish should not be allowed after sending PUBREL
-        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID), false);
+        let r = sm.outbound_publish(IdentifiedQoS::ExactlyOnce(PID));
         assert_eq!(r, Err(StateError::MismatchedHandshakeState));
 
         assert!(sm.inbound_publishes.is_empty());

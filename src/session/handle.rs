@@ -7,20 +7,39 @@ use crate::{
     types::{PacketIdentifier, QoS, ReasonCode},
 };
 
-pub struct FreeHandle<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize> {
-    pub session: &'a mut Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+pub struct FreeHandle<
+    'a,
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub session: &'a mut Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
     pub packet_identifier: PacketIdentifier,
 }
 
-impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    FreeHandle<'a, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    FreeHandle<'a, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
+    pub fn outbound_sub(self) -> Result<(), StateError> {
+        self.session
+            .subs
+            .push(self.packet_identifier)
+            .map_err(|_| StateError::NoCapacity)
+    }
+    pub fn outbound_unsub(self) -> Result<(), StateError> {
+        self.session
+            .unsubs
+            .push(self.packet_identifier)
+            .map_err(|_| StateError::NoCapacity)
+    }
     pub fn outbound_publish(self, qos: QoS, manual: bool) -> Result<(), StateError> {
         assert_ne!(qos, QoS::AtMostOnce);
 
         let initial_state = match qos {
-            QoS::AtMostOnce => panic!(),
-            QoS::AtLeastOnce if manual => panic!(),
+            QoS::AtMostOnce => panic!("QoS 0 is not to be tracked, so this call is incorrect"),
+            QoS::AtLeastOnce if manual => {
+                panic!("QoS 1 is not to be tracked, so this call is incorrect")
+            }
             QoS::AtLeastOnce => LocalPublishState::AwaitAck,
             QoS::ExactlyOnce => LocalPublishState::AwaitRec(manual),
         };
@@ -32,21 +51,58 @@ impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     }
 }
 
-pub struct InboundHandle<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize> {
-    pub session: &'a mut Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+pub struct SubHandle<
+    'a,
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub session: &'a mut Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+    pub i: usize,
+    pub packet_identifier: PacketIdentifier,
+}
+
+impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    SubHandle<'a, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+{
+    pub(crate) fn remove(self) {
+        self.session.subs.swap_remove(self.i);
+    }
+}
+
+pub struct UnsubHandle<
+    'a,
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub session: &'a mut Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+    pub i: usize,
+    pub packet_identifier: PacketIdentifier,
+}
+
+impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    UnsubHandle<'a, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+{
+    pub(crate) fn remove(self) {
+        self.session.unsubs.swap_remove(self.i);
+    }
+}
+
+pub struct InboundHandle<
+    'a,
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub session: &'a mut Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
     pub i: usize,
     pub packet_identifier: PacketIdentifier,
     pub state: PeerPublishState,
 }
-pub struct OutboundHandle<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize> {
-    pub session: &'a mut Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
-    pub i: usize,
-    pub packet_identifier: PacketIdentifier,
-    pub state: LocalPublishState,
-}
 
-impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    InboundHandle<'a, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    InboundHandle<'a, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
     pub(crate) fn set(&mut self, state: PeerPublishState) {
         self.state = state;
@@ -58,7 +114,7 @@ impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
 
     pub(crate) fn inbound_publish(&mut self, qos: QoS) -> (Response, Event) {
         match qos {
-            QoS::AtMostOnce => panic!("QoS 1 has no packet identifier, so this call is incorrect"),
+            QoS::AtMostOnce => panic!("QoS 0 has no packet identifier, so this call is incorrect"),
             QoS::AtLeastOnce => match self.state {
                 PeerPublishState::DueAck
                 | PeerPublishState::AwaitPublishExactlyOnce(_)
@@ -184,8 +240,20 @@ impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
     }
 }
 
-impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
-    OutboundHandle<'a, RECEIVE_MAXIMUM, SEND_MAXIMUM>
+pub struct OutboundHandle<
+    'a,
+    const SUBSCRIBE_MAXIMUM: usize,
+    const RECEIVE_MAXIMUM: usize,
+    const SEND_MAXIMUM: usize,
+> {
+    pub session: &'a mut Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+    pub i: usize,
+    pub packet_identifier: PacketIdentifier,
+    pub state: LocalPublishState,
+}
+
+impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
+    OutboundHandle<'a, SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>
 {
     pub(crate) fn set(&mut self, state: LocalPublishState) {
         self.state = state;
@@ -216,14 +284,10 @@ impl<'a, const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
         self.state
     }
 
-    pub(crate) fn outbound_publish(
-        &mut self,
-        qos: QoS,
-        manual_ack: bool,
-    ) -> Result<(), StateError> {
+    pub(crate) fn outbound_publish(&mut self, qos: QoS) -> Result<(), StateError> {
         match qos {
             QoS::AtMostOnce => {
-                panic!("QoS 1 has no packet identifier, so this call is incorrect")
+                panic!("QoS 0 has no packet identifier, so this call is incorrect")
             }
             QoS::AtLeastOnce => match self.state {
                 LocalPublishState::DuePublishAtLeastOnce => {

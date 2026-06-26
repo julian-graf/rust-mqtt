@@ -49,7 +49,7 @@ pub use err::Error as MqttError;
 /// An MQTT client.
 ///
 /// Configuration via const parameters:
-/// - `MAX_SUBSCRIBES`: The maximum amount of in-flight/unacknowledged SUBSCRIBE packets (one per call to [`Self::subscribe`]).
+/// - `SUBSCRIBE_MAXIMUM`: The maximum amount of in-flight/unacknowledged SUBSCRIBE packets (one per call to [`Self::subscribe`]).
 /// - `RECEIVE_MAXIMUM`: MQTT's control flow mechanism. The maximum amount of incoming [`QoS::AtLeastOnce`] and
 ///   [`QoS::ExactlyOnce`] publications (accumulated). Must not be 0 and must not be greater than 65535.
 /// - `SEND_MAXIMUM`: The maximum amount of outgoing [`QoS::AtLeastOnce`] and [`QoS::ExactlyOnce`] publications. The server
@@ -66,7 +66,7 @@ pub struct Client<
     'c,
     N: Transport,
     B: BufferProvider<'c>,
-    const MAX_SUBSCRIBES: usize,
+    const SUBSCRIBE_MAXIMUM: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
     const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
@@ -75,16 +75,9 @@ pub struct Client<
     client_config: ClientConfig,
     shared_config: SharedConfig,
     server_config: ServerConfig,
-    session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+    session: Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
 
     raw: Raw<'c, N, B>,
-
-    packet_identifier_counter: PacketIdentifier,
-
-    /// sent SUBSCRIBE packets
-    pending_suback: Vec<PacketIdentifier, MAX_SUBSCRIBES>,
-    /// sent UNSUBSCRIBE packets
-    pending_unsuback: Vec<PacketIdentifier, MAX_SUBSCRIBES>,
 
     manually_ack_on:
         &'c dyn Fn(&Publish<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>) -> bool,
@@ -94,7 +87,7 @@ impl<
     'c,
     N: Transport + core::fmt::Debug,
     B: BufferProvider<'c> + core::fmt::Debug,
-    const MAX_SUBSCRIBES: usize,
+    const SUBSCRIBE_MAXIMUM: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
     const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
@@ -104,7 +97,7 @@ impl<
         'c,
         N,
         B,
-        MAX_SUBSCRIBES,
+        SUBSCRIBE_MAXIMUM,
         RECEIVE_MAXIMUM,
         SEND_MAXIMUM,
         MAX_SUBSCRIPTION_IDENTIFIERS,
@@ -118,9 +111,6 @@ impl<
             .field("server_config", &self.server_config)
             .field("session", &self.session)
             .field("raw", &self.raw)
-            .field("packet_identifier_counter", &self.packet_identifier_counter)
-            .field("pending_suback", &self.pending_suback)
-            .field("pending_unsuback", &self.pending_unsuback)
             .finish_non_exhaustive()
     }
 }
@@ -129,7 +119,7 @@ impl<
     'c,
     N: Transport,
     B: BufferProvider<'c>,
-    const MAX_SUBSCRIBES: usize,
+    const SUBSCRIBE_MAXIMUM: usize,
     const RECEIVE_MAXIMUM: usize,
     const SEND_MAXIMUM: usize,
     const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
@@ -139,7 +129,7 @@ impl<
         'c,
         N,
         B,
-        MAX_SUBSCRIBES,
+        SUBSCRIBE_MAXIMUM,
         RECEIVE_MAXIMUM,
         SEND_MAXIMUM,
         MAX_SUBSCRIPTION_IDENTIFIERS,
@@ -153,6 +143,10 @@ impl<
     /// All publications will be acknowledged automatically.
     pub fn new(buffer: &'c mut B) -> Self {
         const {
+            const_assert!(
+                SUBSCRIBE_MAXIMUM <= 65535,
+                "SUBSCRIBE_MAXIMUM must be less than or equal to 65535"
+            );
             const_assert!(
                 RECEIVE_MAXIMUM <= 65535,
                 "RECEIVE_MAXIMUM must be less than or equal to 65535"
@@ -175,11 +169,6 @@ impl<
             // sm: todo!(),
             raw: Raw::new_disconnected(buffer),
 
-            packet_identifier_counter: PacketIdentifier::ONE,
-
-            pending_suback: Vec::new(),
-            pending_unsuback: Vec::new(),
-
             manually_ack_on: &|_| false,
         }
     }
@@ -187,7 +176,7 @@ impl<
     /// Creates a new, disconnected MQTT client using a buffer provider to store
     /// dynamically sized fields of received packets.
     pub fn with_session(
-        session: Session<RECEIVE_MAXIMUM, SEND_MAXIMUM>,
+        session: Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
         buffer: &'c mut B,
     ) -> Self {
         let mut s = Self::new(buffer);
@@ -234,7 +223,7 @@ impl<
 
     /// Returns session related configuration and tracking information.
     #[inline]
-    pub fn session(&self) -> &Session<RECEIVE_MAXIMUM, SEND_MAXIMUM> {
+    pub fn session(&self) -> &Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM> {
         &self.session
     }
 
@@ -329,13 +318,6 @@ impl<
                 MAX_USER_PROPERTIES
             );
         }
-
-        if options.clean_start {
-            self.session.clear();
-        }
-
-        self.pending_suback.clear();
-        self.pending_unsuback.clear();
 
         self.raw.set_net(net);
 
@@ -471,11 +453,6 @@ impl<
         if reason_code.is_success() {
             debug!("CONNACK packet indicates success");
 
-            if !session_present && !options.clean_start {
-                info!("server does not have the requested session present.");
-                self.session.clear();
-            }
-
             let client_identifier = assigned_client_identifier
                 .map(Property::into_inner)
                 .or(client_identifier)
@@ -484,6 +461,24 @@ impl<
                     self.raw.close_with(Some(ReasonCode::ProtocolError));
                     MqttError::Server
                 })?;
+
+            if session_present && options.clean_start {
+                error!("server set the session present flag when clean start was set.");
+                self.raw.close_with(Some(ReasonCode::ProtocolError));
+                return Err(MqttError::Server);
+            } else if session_present {
+                info!("connected to server and reconnected to session");
+                self.session.reconnect();
+            } else {
+                if options.clean_start {
+                    info!("connected to server.");
+                } else {
+                    info!(
+                        "connected to server but server does not have the requested session present."
+                    );
+                }
+                self.session.clear();
+            }
 
             self.shared_config.session_expiry_interval =
                 session_expiry_interval.unwrap_or(options.session_expiry_interval);
@@ -514,12 +509,6 @@ impl<
             if let Some(s) = shared_subscription_available {
                 self.server_config.shared_subscription_supported = s.into_inner();
             }
-
-            if session_present {
-                self.session.reconnect();
-            }
-
-            info!("connected to server (session present: {})", session_present);
 
             Ok(Connected {
                 session_present,
@@ -634,10 +623,16 @@ impl<
             return Err(MqttError::UnsupportedByServer);
         }
 
-        if self.pending_suback.is_full() {
-            info!("maximum concurrent subscriptions reached");
+        let Some(h) = self.session.free_handle() else {
+            info!("no free packet identifier");
             return Err(MqttError::SessionBuffer);
-        }
+        };
+        let pid = h.packet_identifier;
+
+        h.outbound_sub().map_err(|_| {
+            info!("maximum concurrent subscriptions reached");
+            MqttError::SessionBuffer
+        })?;
 
         let subscribe_filter = SubscriptionFilter::new(topic_filter, options);
 
@@ -664,9 +659,6 @@ impl<
 
         self.raw.send(&packet).await?;
         self.raw.flush().await?;
-
-        // `!self.pending_suback.is_full` guarantees there is space
-        self.pending_suback.push(pid).unwrap();
 
         Ok(pid)
     }
@@ -704,12 +696,17 @@ impl<
             MAX_USER_PROPERTIES
         );
 
-        if self.pending_unsuback.is_full() {
-            info!("maximum concurrent unsubscriptions reached");
+        let Some(h) = self.session.free_handle() else {
+            info!("no free packet identifier");
             return Err(MqttError::SessionBuffer);
-        }
+        };
+        let pid = h.packet_identifier;
 
-        let pid = self.session.free_handle().unwrap().packet_identifier;
+        h.outbound_unsub().map_err(|_| {
+            info!("maximum concurrent unsubscriptions reached");
+            MqttError::SessionBuffer
+        })?;
+
         let topic_filters = [topic_filter].into();
         let packet = UnsubscribePacket::<1, MAX_USER_PROPERTIES>::new(
             pid,
@@ -731,9 +728,6 @@ impl<
 
         self.raw.send(&packet).await?;
         self.raw.flush().await?;
-
-        // `!self.pending_unsuback.is_full` guarantees there is space
-        self.pending_unsuback.push(pid).unwrap();
 
         Ok(pid)
     }
@@ -807,7 +801,7 @@ impl<
             return Err(MqttError::UnsupportedByServer);
         }
 
-        if options.qos > QoS::AtMostOnce {
+        let (identified_qos, handle) = if options.qos > QoS::AtMostOnce {
             if self.remaining_send_quota() == 0 {
                 info!("server receive maximum reached");
                 return Err(MqttError::SendQuotaExceeded);
@@ -816,16 +810,19 @@ impl<
                 info!("client maximum concurrent publications reached");
                 return Err(MqttError::SessionBuffer);
             }
-        }
 
-        let identified_qos = match options.qos {
-            QoS::AtMostOnce => IdentifiedQoS::AtMostOnce,
-            QoS::AtLeastOnce => {
-                IdentifiedQoS::AtLeastOnce(self.session.free_handle().unwrap().packet_identifier)
+            let Some(handle) = self.session.free_handle() else {
+                info!("no free packet identifier");
+                todo!("new error variant?");
+            };
+
+            match options.qos {
+                QoS::AtMostOnce => unreachable!(),
+                QoS::AtLeastOnce => (IdentifiedQoS::AtLeastOnce(handle.packet_identifier), Some(handle)),
+                QoS::ExactlyOnce => (IdentifiedQoS::ExactlyOnce(handle.packet_identifier), Some(handle)),
             }
-            QoS::ExactlyOnce => {
-                IdentifiedQoS::ExactlyOnce(self.session.free_handle().unwrap().packet_identifier)
-            }
+        } else {
+            (IdentifiedQoS::AtMostOnce, None)
         };
 
         let packet = PublishPacket::<0, MAX_USER_PROPERTIES>::new(
@@ -858,17 +855,19 @@ impl<
             return Err(MqttError::ServerMaximumPacketSizeExceeded);
         }
 
-        // Treat the packet as sent before successfully sending. In case of a network error,
-        // we have tracked the packet as in flight and can republish it.
-        if let Err(e) = self.session.outbound_publish(identified_qos, false) {
-            match e {
-                StateError::NoCapacity => unreachable!("error should have been thrown before"),
-                StateError::UnusedPacketIdentifier => unreachable!(),
-                StateError::MismatchedQoS => {
-                    unreachable!("the selected packet identifier is always unused")
-                }
-                StateError::MismatchedHandshakeState => {
-                    unreachable!("the selected packet identifier is always unused")
+        if let Some(handle) = handle {
+            // Treat the packet as sent before successfully sending. In case of a network error,
+            // we have tracked the packet as in flight and can republish it.
+            if let Err(e) = handle.outbound_publish(options.qos, false) {
+                match e {
+                    StateError::NoCapacity => unreachable!("error should have been thrown before"),
+                    StateError::UnusedPacketIdentifier => unreachable!(),
+                    StateError::MismatchedQoS => {
+                        unreachable!("the selected packet identifier is always unused")
+                    }
+                    StateError::MismatchedHandshakeState => {
+                        unreachable!("the selected packet identifier is always unused")
+                    }
                 }
             }
         }
@@ -1011,7 +1010,7 @@ impl<
         }
 
         // TODO manual ack
-        if let Err(e) = self.session.outbound_publish(identified_qos, false) {
+        if let Err(e) = self.session.outbound_publish(identified_qos) {
             match e {
                 StateError::NoCapacity => {
                     unreachable!("we checked that this packet identifier is in flight")
@@ -1309,9 +1308,8 @@ impl<
 
                 let pid = suback.packet_identifier;
 
-                if Self::remove_packet_identifier_if_exists(&mut self.pending_suback, pid) {
-                    // We only send SUBSCRIBE packets with exactly 1 topic
-
+                if let Some(h) = self.session.sub_handle(pid) {
+                    h.remove();
                     let [r] = suback.reason_codes.as_slice() else {
                         error!("received mismatched SUBACK");
                         self.raw.close_with(Some(ReasonCode::ProtocolError));
@@ -1354,7 +1352,9 @@ impl<
 
                 let pid = unsuback.packet_identifier;
 
-                if Self::remove_packet_identifier_if_exists(&mut self.pending_unsuback, pid) {
+                if let Some(h) = self.session.unsub_handle(pid) {
+                    h.remove();
+
                     // We only send UNSUBSCRIBE packets with exactly 1 topic
                     let [r] = unsuback.reason_codes.as_slice() else {
                         error!("received mismatched UNSUBACK");
