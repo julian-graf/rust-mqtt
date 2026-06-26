@@ -1,5 +1,6 @@
 //! Contains user-facing option types for configuring client actions.
 
+mod ack;
 mod connect;
 mod disconnect;
 mod publish;

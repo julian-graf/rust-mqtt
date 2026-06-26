@@ -103,7 +103,7 @@ pub enum Error<'e, const MAX_USER_PROPERTIES: usize> {
     /// Sending the PUBLISH packet in this case would result in a protocol violation.
     ///
     /// Recoverable error. No action has been taken by the client.
-    PacketIdentifierAwaitingPubcomp,
+    PacketIdentifierStateMismatched,
 
     /// A packet was too long to encode its length with the variable byte integer.
     ///
@@ -185,7 +185,7 @@ impl<const MAX_USER_PROPERTIES: usize> Error<'_, MAX_USER_PROPERTIES> {
             self,
             Self::PacketIdentifierNotInFlight
                 | Self::RepublishQoSNotMatching
-                | Self::PacketIdentifierAwaitingPubcomp
+                | Self::PacketIdentifierStateMismatched
                 | Self::PacketMaximumLengthExceeded
                 | Self::ServerMaximumPacketSizeExceeded
                 | Self::SessionBuffer
@@ -222,7 +222,7 @@ impl<'e> Error<'e, 0> {
             Self::RecoveryRequired => Error::RecoveryRequired,
             Self::PacketIdentifierNotInFlight => Error::PacketIdentifierNotInFlight,
             Self::RepublishQoSNotMatching => Error::RepublishQoSNotMatching,
-            Self::PacketIdentifierAwaitingPubcomp => Error::PacketIdentifierAwaitingPubcomp,
+            Self::PacketIdentifierStateMismatched => Error::PacketIdentifierStateMismatched,
             Self::PacketMaximumLengthExceeded => Error::PacketMaximumLengthExceeded,
             Self::ServerMaximumPacketSizeExceeded => Error::ServerMaximumPacketSizeExceeded,
             Self::SessionBuffer => Error::SessionBuffer,

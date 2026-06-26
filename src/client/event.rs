@@ -70,15 +70,23 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// indicates success. The UNSUBSCRIBE packet won't have to be resent.
     Unsuback(Suback<'e, MAX_USER_PROPERTIES>),
 
-    /// The server sent a PUBACK or PUBREC with an erroneous [`ReasonCode`], therefore
-    /// rejecting the publication. The publication process is aborted, the client has
-    /// removed this publication's flight state from its session and has not responded
+    /// The server sent a PUBACK, PUBREC or PUBCOMP with an erroneous [`ReasonCode`],
+    /// therefore rejecting the publication. The publication process is aborted, the client
+    /// has removed this publication's flight state from its session and has not responded
     /// with another packet. The publication can be retried with [`Client::publish`].
     ///
     /// The included [`ReasonCode`] is always erroneous.
     ///
     /// [`Client::publish`]: crate::client::Client::publish
     PublishRejected(Pubrej<'e, MAX_USER_PROPERTIES>),
+
+    /// The server sent a PUBREL with an erroneous [`ReasonCode`], therefore aborting its
+    /// own publication. This can only be [`ReasonCode::PacketIdentifierNotFound`]. Note
+    /// that the client has already delivered the associated publication.
+    ///
+    /// This is not an error during recovery, but at other times indicates a mismatch
+    /// between the session state on the client and server.
+    PublishAborted(Pubrej<'e, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBACK packet matching a [`QoS::AtLeastOnce`] PUBLISH packet
     /// confirming that the PUBLISH has been received. The [`QoS::AtLeastOnce`]
