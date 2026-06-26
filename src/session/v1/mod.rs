@@ -79,7 +79,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
 
     /// Returns the state of the publication of the packet identifier if the packet identifier is in-flight in an outgoing publication.
     #[must_use]
-    pub fn client_publish_state(
+    pub fn local_publish_state(
         &self,
         packet_identifier: PacketIdentifier,
     ) -> Option<ClientPublishState> {
@@ -356,7 +356,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
             IdentifiedQoS::AtMostOnce => Ok(()),
             IdentifiedQoS::AtLeastOnce(pid) => {
                 // Check whether this is a republish or a new publication
-                if let Some(s) = self.client_publish_state(pid) {
+                if let Some(s) = self.local_publish_state(pid) {
                     if ClientPublishState::AwaitAck == s {
                         Ok(())
                     } else {
@@ -371,7 +371,7 @@ impl<const RECEIVE_MAXIMUM: usize, const SEND_MAXIMUM: usize>
             }
             IdentifiedQoS::ExactlyOnce(pid) => {
                 // Check whether this is a republish or a new publication
-                if let Some(s) = self.client_publish_state(pid) {
+                if let Some(s) = self.local_publish_state(pid) {
                     match s {
                         ClientPublishState::AwaitAck => Err(StateError::MismatchedQoS),
                         ClientPublishState::AwaitRec | ClientPublishState::AwaitRecManual => {

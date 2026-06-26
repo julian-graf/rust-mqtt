@@ -594,7 +594,7 @@ async fn outgoing_qos1_read_fail_retry() {
 
                 // Complete publish
 
-                let pid = session.outbound_publishes.keys().next().copied().unwrap();
+                let pid = session.outbound_publishes.first().unwrap().0;
 
                 let mut tx: Client<'_, _, _, 1, 1, 1, 1, 16> =
                     Client::with_session(session, ALLOC.get());
@@ -1306,7 +1306,7 @@ async fn incoming_qos2_write_fail_retry() {
 
                 // Complete publish using infallible connection
                 // This is only Some(pid) when we haven't received PUBREL yet.
-                let pid = session.inbound_publishes.keys().next().copied();
+                let pid = session.inbound_publishes.first().copied();
 
                 let mut rx: Client<'_, _, _, 1, 1, 1, 1, 16> =
                     Client::with_session(session, ALLOC.get());
@@ -1318,7 +1318,7 @@ async fn incoming_qos2_write_fail_retry() {
 
                 loop {
                     match pid {
-                        Some(pid) => match assert_ok!(rx.poll().await) {
+                        Some((pid, _)) => match assert_ok!(rx.poll().await) {
                             Event::Duplicate => {}
                             Event::PublishReleased(Puback {
                                 manual_ack,
@@ -1449,7 +1449,7 @@ async fn incoming_qos2_read_fail_retry() {
 
                 // Complete publish using infallible connection
                 // This is only Some(pid) when we haven't received PUBREL yet.
-                let pid = session.inbound_publishes.keys().next().copied();
+                let pid = session.inbound_publishes.first().copied();
 
                 let mut rx: Client<'_, _, _, 1, 1, 1, 1, 16> =
                     Client::with_session(session, ALLOC.get());
@@ -1469,7 +1469,7 @@ async fn incoming_qos2_read_fail_retry() {
                             reason_code: _,
                             reason_string: _,
                             user_properties: _,
-                        }) if packet_identifier == pid.unwrap() => break 'complete,
+                        }) if packet_identifier == pid.unwrap().0 => break 'complete,
                         Event::PublishReleased(_) => panic!("Received non-matching PUBREL"),
                         Event::Publish(Publish {
                             identified_qos: IdentifiedQoS::ExactlyOnce(packet_identifier),

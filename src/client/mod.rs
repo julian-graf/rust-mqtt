@@ -22,7 +22,6 @@ use crate::{
     packet::{Packet, TxPacket},
     session::{
         Session,
-        state::LocalPublishState,
         state_machine::{self, Response, StateError},
     },
     types::{
@@ -215,14 +214,6 @@ impl<
         self.server_config.receive_maximum.get() - self.session.active_outbound_publishes()
     }
 
-    fn is_packet_identifier_used(&self, packet_identifier: PacketIdentifier) -> bool {
-        self.session
-            .client_publish_state(packet_identifier)
-            .is_some()
-            || self.pending_suback.contains(&packet_identifier)
-            || self.pending_unsuback.contains(&packet_identifier)
-    }
-
     /// Returns configuration for this client.
     #[inline]
     pub fn client_config(&self) -> &ClientConfig {
@@ -259,19 +250,6 @@ impl<
     #[inline]
     pub fn buffer_mut(&mut self) -> &mut B {
         self.raw.buffer_mut()
-    }
-
-    /// Generates a new packet identifier.
-    fn packet_identifier(&mut self) -> PacketIdentifier {
-        loop {
-            let packet_identifier = self.packet_identifier_counter;
-
-            self.packet_identifier_counter = packet_identifier.next();
-
-            if !self.is_packet_identifier_used(packet_identifier) {
-                break packet_identifier;
-            }
-        }
     }
 
     /// Returns true if the packet identifier exists.
@@ -663,7 +641,7 @@ impl<
 
         let subscribe_filter = SubscriptionFilter::new(topic_filter, options);
 
-        let pid = self.packet_identifier();
+        let pid = self.session.free_handle().unwrap().packet_identifier;
         let subscribe_filters = [subscribe_filter].into();
         let packet = SubscribePacket::<1, MAX_USER_PROPERTIES>::new(
             pid,
@@ -731,7 +709,7 @@ impl<
             return Err(MqttError::SessionBuffer);
         }
 
-        let pid = self.packet_identifier();
+        let pid = self.session.free_handle().unwrap().packet_identifier;
         let topic_filters = [topic_filter].into();
         let packet = UnsubscribePacket::<1, MAX_USER_PROPERTIES>::new(
             pid,
@@ -842,8 +820,12 @@ impl<
 
         let identified_qos = match options.qos {
             QoS::AtMostOnce => IdentifiedQoS::AtMostOnce,
-            QoS::AtLeastOnce => IdentifiedQoS::AtLeastOnce(self.packet_identifier()),
-            QoS::ExactlyOnce => IdentifiedQoS::ExactlyOnce(self.packet_identifier()),
+            QoS::AtLeastOnce => {
+                IdentifiedQoS::AtLeastOnce(self.session.free_handle().unwrap().packet_identifier)
+            }
+            QoS::ExactlyOnce => {
+                IdentifiedQoS::ExactlyOnce(self.session.free_handle().unwrap().packet_identifier)
+            }
         };
 
         let packet = PublishPacket::<0, MAX_USER_PROPERTIES>::new(
@@ -1024,11 +1006,7 @@ impl<
             return Err(MqttError::ServerMaximumPacketSizeExceeded);
         }
 
-        if self
-            .session
-            .client_publish_state(packet_identifier)
-            .is_none()
-        {
+        if self.session.outbound_handle(packet_identifier).is_none() {
             return Err(MqttError::PacketIdentifierNotInFlight);
         }
 
@@ -1082,22 +1060,25 @@ impl<
     /// * [`MqttError::RecoveryRequired`] if an unrecoverable error occured previously
     /// * [`MqttError::Network`] if the underlying [`Transport`] returned an error
     pub async fn rerelease(&mut self) -> Result<(), MqttError<'c, 0>> {
-        while let Some(packet_identifier) = self
-            .session
-            .outbound_publishes
-            .iter()
-            .filter(|s| matches!(s.1, LocalPublishState::DueRel(_)))
-            .next()
-            .map(|p| *p.0)
-        {
-            assert!(self.session.outbound_pubrel(packet_identifier).is_ok());
+        let Some(mut handle) = self.session.outbound_iter() else {
+            return Ok(());
+        };
 
-            let pubrel = PubrelPacket::<0>::new(packet_identifier, ReasonCode::Success);
+        loop {
+            if handle.outbound_pubrel().is_ok() {
+                let pubrel =
+                    PubrelPacket::<0>::new(handle.packet_identifier(), ReasonCode::Success);
 
-            // Don't check whether length exceeds servers maximum packet size because we don't
-            // add properties to PUBREL packets -> length is always minimal at 6 bytes.
-            // The server really shouldn't reject this.
-            self.raw.send(&pubrel).await?;
+                // Don't check whether length exceeds servers maximum packet size because we don't
+                // add properties to PUBREL packets -> length is always minimal at 6 bytes.
+                // The server really shouldn't reject this.
+                self.raw.send(&pubrel).await?;
+            }
+            if let Some(next) = handle.next() {
+                handle = next;
+            } else {
+                break;
+            }
         }
 
         self.raw.flush().await?;
