@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// A simple wrapper around [`NonZero`]<[`u16`]>.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PacketIdentifier(NonZero<u16>);
 
 impl PacketIdentifier {

@@ -319,6 +319,7 @@ async fn main() {
     loop {
         match client.poll().await {
             Ok(Event::PublishComplete(Puback {
+                ack_mode: _,
                 packet_identifier,
                 reason_code: _,
                 reason_string: _,
