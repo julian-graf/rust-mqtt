@@ -43,7 +43,12 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// The server sent a PINGRESP packet.
     Pingresp,
 
-    /// The server sent a PUBLISH packet.
+    /// The server sent a PUBLISH packet. In the case of [`QoS::AtLeastOnce`], this can be
+    /// a duplicate packet as indicated by the `DUP` flag, however, this flag being set
+    /// does not rule out the possibility of this packet being the first one to deliver
+    /// the application message. In the case of [`QoS::ExactlyOnce`], this packet is
+    /// definitely the first one to deliver the application message despite the setting
+    /// of the `DUP` flag.
     ///
     /// The client has responded as follows:
     /// - [`QoS::AtMostOnce`]: No action
@@ -80,18 +85,29 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// [`Client::publish`]: crate::client::Client::publish
     PublishRejected(Pubrej<'e, MAX_USER_PROPERTIES>),
 
-    /// The server sent a PUBREL with an erroneous [`ReasonCode`], therefore aborting its
-    /// own publication. This can only be [`ReasonCode::PacketIdentifierNotFound`]. Note
-    /// that the client has already delivered the associated publication.
+    /// The server sent a PUBREL with an erroneous [`ReasonCode`] or it sent a PUBLISH with a
+    /// different [`QoS`] than the original [`QoS`] (realistically, this only happens in
+    /// [`QoS::ExactlyOnce`] flows, where a duplicate PUBLISH packet with [`QoS::AtLeastOnce`]
+    /// is received), therefore aborting its own publication.
+    ///
+    /// In the case of the erroneous PUBREL, this can only be
+    /// [`ReasonCode::PacketIdentifierNotFound`]. Note that the client has already delivered
+    /// the associated publication in both cases.
     ///
     /// This is not an error during recovery, but at other times indicates a mismatch
     /// between the session state on the client and server.
+    ///
+    /// [`QoS`]: crate::types::QoS
+    /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
+    /// [`QoS::AtLeastOnce`]: crate::types::QoS::AtLeastOnce
     PublishAborted(Pubrej<'e, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBACK packet matching a [`QoS::AtLeastOnce`] PUBLISH packet
     /// confirming that the PUBLISH has been received. The [`QoS::AtLeastOnce`]
     /// publication process is complete, the PUBLISH packet won't have to be resent.
     ///
+    /// The included [`AckMode`] has no significance because for outgoing publications
+    /// at [`QoS::AtLeastOnce`], there are no acknowledgements to be sent by the client.
     /// The included [`ReasonCode`] is always successful.
     ///
     /// [`QoS::AtLeastOnce`]: crate::types::QoS::AtLeastOnce
@@ -121,6 +137,9 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// confirming that the PUBREL has been received. The [`QoS::ExactlyOnce`]
     /// publication process is complete, the PUBREL packet won't have to be resent.
     ///
+    /// The included [`AckMode`] has no significance because the PUBCOMP packet
+    /// completes the handshake removing the packet identifier from the session state
+    /// completely, there are no more acknowledgements to be sent by the client.
     /// The included [`ReasonCode`] is always successful.
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce

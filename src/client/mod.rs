@@ -997,8 +997,7 @@ impl<
             return Err(MqttError::ServerMaximumPacketSizeExceeded);
         }
 
-        // TODO manual ack
-        if let Err(e) = self.session.outbound_publish(identified_qos) {
+        if let Err(e) = self.session.outbound_republish(identified_qos) {
             match e {
                 StateError::NoCapacity => {
                     unreachable!("a republish can not fail due to missing capacity")
@@ -1664,10 +1663,10 @@ impl<
                     SmEvent::Ignored => Event::Ignored,
                     SmEvent::Aborted => unreachable!(),
                     SmEvent::Rejected => unreachable!(),
-                    SmEvent::Acknowledged(_) => unreachable!(),
+                    SmEvent::Acknowledged => unreachable!(),
                     SmEvent::Received(_) => unreachable!(),
                     SmEvent::Released(_) => unreachable!(),
-                    SmEvent::Completed(_) => unreachable!(),
+                    SmEvent::Completed => unreachable!(),
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }
@@ -1708,12 +1707,12 @@ impl<
                     SmEvent::Ignored => Event::Ignored,
                     SmEvent::Aborted => unreachable!(),
                     SmEvent::Rejected => Event::PublishRejected(Pubrej::from(puback)),
-                    SmEvent::Acknowledged(mode) => {
-                        Event::PublishAcknowledged(Puback::new(puback, mode))
+                    SmEvent::Acknowledged => {
+                        Event::PublishAcknowledged(Puback::new(puback, AckMode::default()))
                     }
                     SmEvent::Received(_) => unreachable!(),
                     SmEvent::Released(_) => unreachable!(),
-                    SmEvent::Completed(_) => unreachable!(),
+                    SmEvent::Completed => unreachable!(),
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }
@@ -1765,10 +1764,10 @@ impl<
                     SmEvent::Ignored => Event::Ignored,
                     SmEvent::Aborted => unreachable!(),
                     SmEvent::Rejected => Event::PublishRejected(Pubrej::from(pubrec)),
-                    SmEvent::Acknowledged(_) => unreachable!(),
+                    SmEvent::Acknowledged => unreachable!(),
                     SmEvent::Received(mode) => Event::PublishReceived(Puback::new(pubrec, mode)),
                     SmEvent::Released(_) => unreachable!(),
-                    SmEvent::Completed(_) => unreachable!(),
+                    SmEvent::Completed => unreachable!(),
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }
@@ -1820,10 +1819,10 @@ impl<
                     SmEvent::Ignored => Event::Ignored,
                     SmEvent::Aborted => Event::PublishAborted(Pubrej::from(pubrel)),
                     SmEvent::Rejected => unreachable!(),
-                    SmEvent::Acknowledged(_) => unreachable!(),
+                    SmEvent::Acknowledged => unreachable!(),
                     SmEvent::Received(_) => unreachable!(),
                     SmEvent::Released(mode) => Event::PublishReleased(Puback::new(pubrel, mode)),
-                    SmEvent::Completed(_) => unreachable!(),
+                    SmEvent::Completed => unreachable!(),
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }
@@ -1864,10 +1863,10 @@ impl<
                     SmEvent::Ignored => Event::Ignored,
                     SmEvent::Aborted => unreachable!(),
                     SmEvent::Rejected => unreachable!(),
-                    SmEvent::Acknowledged(_) => unreachable!(),
+                    SmEvent::Acknowledged => unreachable!(),
                     SmEvent::Received(_) => unreachable!(),
                     SmEvent::Released(_) => unreachable!(),
-                    SmEvent::Completed(mode) => Event::PublishComplete(Puback::new(pubcomp, mode)),
+                    SmEvent::Completed => Event::PublishComplete(Puback::new(pubcomp, AckMode::default())),
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }

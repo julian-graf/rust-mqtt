@@ -112,7 +112,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
         self.session.inbound_publishes.swap_remove(self.i);
     }
 
-    pub(crate) fn inbound_publish(&mut self, qos: QoS) -> (Response, Event) {
+    pub(crate) fn inbound_republish(&mut self, qos: QoS) -> (Response, Event) {
         match qos {
             QoS::AtMostOnce => panic!("QoS 0 has no packet identifier, so this call is incorrect"),
             QoS::AtLeastOnce => match self.state {
@@ -291,7 +291,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
         self.packet_identifier
     }
 
-    pub(crate) fn outbound_publish(&mut self, qos: QoS) -> Result<(), StateError> {
+    pub(crate) fn outbound_republish(&mut self, qos: QoS) -> Result<(), StateError> {
         match qos {
             QoS::AtMostOnce => {
                 panic!("QoS 0 has no packet identifier, so this call is incorrect")
@@ -314,8 +314,8 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 LocalPublishState::AwaitRec(_)
                 | LocalPublishState::DueRel(_)
                 | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedHandshakeState),
-                LocalPublishState::DuePublishExactlyOnce(manual) => {
-                    self.set(LocalPublishState::AwaitRec(manual));
+                LocalPublishState::DuePublishExactlyOnce(mode) => {
+                    self.set(LocalPublishState::AwaitRec(mode));
                     Ok(())
                 }
             },
@@ -328,7 +328,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 self.remove();
 
                 let e = if reason_code.is_success() {
-                    Event::Acknowledged(AckMode::Automatic)
+                    Event::Acknowledged
                 } else {
                     Event::Rejected
                 };
@@ -400,10 +400,10 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
             ),
-            LocalPublishState::AwaitComp(mode) => {
+            LocalPublishState::AwaitComp(_) => {
                 self.remove();
                 if reason_code.is_success() {
-                    (Response::None, Event::Completed(mode))
+                    (Response::None, Event::Completed)
                 } else {
                     // TODO this mirrors the previous behaviour, but perhaps we should be trying to fix the state
                     (Response::None, Event::Rejected)

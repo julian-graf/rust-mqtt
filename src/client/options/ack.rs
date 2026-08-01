@@ -1,3 +1,5 @@
+use core::matches;
+
 use crate::types::{MqttString, MqttStringPair};
 
 /// Options for an acknowledgement to the server with a PUBACK, PUBREC, PUBREL or PUBCOMP packet.

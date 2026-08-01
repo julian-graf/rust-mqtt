@@ -260,7 +260,7 @@ mod unit {
         #[tokio::test]
         #[test_log::test]
         async fn encode_properties() {
-            let mut packet = PubackPacket::<16>::new(
+            let packet = PubackPacket::<16>::new(
                 PacketIdentifier::new(NonZero::new(23485).unwrap()),
                 ReasonCode::TopicNameInvalid,
                 Some(ReasonString(
@@ -450,7 +450,7 @@ mod unit {
         #[tokio::test]
         #[test_log::test]
         async fn encode_properties() {
-            let mut packet = PubrecPacket::<16>::new(
+            let packet = PubrecPacket::<16>::new(
                 PacketIdentifier::new(NonZero::new(23895).unwrap()),
                 ReasonCode::ImplementationSpecificError,
                 Some(ReasonString(MqttString::from_str("I crashed :(").unwrap())),
@@ -635,7 +635,7 @@ mod unit {
         #[tokio::test]
         #[test_log::test]
         async fn encode_properties() {
-            let mut packet = PubrelPacket::<16>::new(
+            let packet = PubrelPacket::<16>::new(
                 PacketIdentifier::new(NonZero::new(9786).unwrap()),
                 ReasonCode::PacketIdentifierNotFound,
                 Some(ReasonString(MqttString::try_from("test reason").unwrap())),
@@ -818,7 +818,7 @@ mod unit {
         #[tokio::test]
         #[test_log::test]
         async fn encode_properties() {
-            let mut packet = PubcompPacket::<16>::new(
+            let packet = PubcompPacket::<16>::new(
                 PacketIdentifier::new(NonZero::new(9786).unwrap()),
                 ReasonCode::PacketIdentifierNotFound,
                 Some(ReasonString(MqttString::try_from("test reason").unwrap())),
