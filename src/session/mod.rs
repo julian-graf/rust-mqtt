@@ -50,11 +50,13 @@ pub enum LocalPublishState {
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     AwaitRec(AckMode),
-    /// A PUBREC packet has been received or a reconnection has occured with a PUBREL packet
-    /// having been sent before. The next step in the handshake is the client (re-)sending a
-    /// PUBREL packet. Whether this packet must be sent manually by the user is determined by
-    /// the contained [`AckMode`].
-    DueRel(AckMode),
+    /// A PUBREC packet has been received. The next step in the handshake is the client
+    /// sending a PUBREL packet. This packet must be sent manually by the user.
+    DueRel,
+    /// A reconnection has occured with a PUBREL packet having been sent before. The next step
+    /// in the handshake is the client resending a PUBREL packet. Whether this packet must be
+    /// sent manually by the user is determined by the contained [`AckMode`].
+    DueReRel(AckMode),
     /// A PUBREL packet has been sent. The final and next step in the handshake is the server
     /// sending a PUBCOMP packet.
     AwaitComp(AckMode),
@@ -68,8 +70,9 @@ impl LocalPublishState {
 
             Self::DuePublishExactlyOnce(mode) => Self::DuePublishExactlyOnce(mode),
             Self::AwaitRec(mode) => Self::DuePublishExactlyOnce(mode),
-            Self::DueRel(mode) => Self::DueRel(mode),
-            Self::AwaitComp(mode) => Self::DueRel(mode),
+            Self::DueRel => Self::DueRel,
+            Self::DueReRel(mode) => Self::DueReRel(mode),
+            Self::AwaitComp(mode) => Self::DueReRel(mode),
         }
     }
 }
@@ -376,7 +379,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
             IdentifiedQoS::AtMostOnce => (Response::None, Event::Publish),
             IdentifiedQoS::AtLeastOnce(pid) | IdentifiedQoS::ExactlyOnce(pid) => self
                 .inbound_handle(pid)
-                .map(|mut h| h.inbound_republish(identified_qos.into()))
+                .map(|h| h.inbound_republish(identified_qos.into()))
                 .unwrap_or_else(|| {
                     if self.available_inbound_publish_capacity() {
                         match identified_qos {
@@ -439,17 +442,12 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
     ) -> (Response, Event) {
         self.inbound_handle(packet_identifier)
             .map(|h| h.inbound_pubrel(reason_code))
-            .unwrap_or_else (||
-                // The reason code in this case can only be PacketIdentifierNotFound
-                if reason_code.is_erroneous() {
-                    (Response::None, Event::Ignored)
-                } else {
-                    (
-                        Response::Complete(ReasonCode::PacketIdentifierNotFound),
-                        Event::Ignored,
-                    )
-                },
-            )
+            .unwrap_or_else(|| {
+                (
+                    Response::Complete(ReasonCode::PacketIdentifierNotFound),
+                    Event::Ignored,
+                )
+            })
     }
 
     pub(crate) fn outbound_pubcomp(
@@ -622,1406 +620,1431 @@ mod unit {
         };
     }
 
+    // Allgemein gilt:
+    // - Ein einziges negatives PUBX paket (egal wann) reicht, um den eintrag zu löschen
+    // - Im manual mode trotzdem automatische PUBX response pakete, wenn
+    //   - mit dem eingehenden Paket aktuell nicht gerechnet wird, man
+    //     aber trotzdem eine response schicken muss gemäß spec und das
+    //     ausgehende Paket nicht schon manuell ausstehend (due) ist.
+    //   - ausgehende PUBX fehlerhafte reason codes benötigen
+    //
+    // Bei QoS Mismatch (Anderes QoS im PUBLISH):
+    //
+    // Bei QoS Mismatch (PUBACK bzw PUBREC/PUBREL/PUBCOMP) auf anderes QoS entry:
+    //
+    // Bei State Mismatch (vor allem QoS 2):
+    //
+
     mod spec {
         mod qos1 {
-            sm_test!(
-                sender_must_resend_unacknowledged,
-                [
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => ok(),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => ok(),
-                ]
-            );
-            sm_test!(
-                sender_must_not_resend_same_connection,
-                [
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => ok(),
-                    out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_must_not_resend_acknowledged,
-                [
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(Success) => res(None, Acknowledged),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+            mod sender {
+                sm_test!(
+                    must_resend_unacknowledged,
+                    [
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => ok(),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => ok(),
+                    ]
+                );
+                sm_test!(
+                    must_not_resend_same_connection,
+                    [
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => ok(),
+                        out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+                    ]
+                );
+                sm_test!(
+                    must_not_resend_acknowledged,
+                    [
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(Success) => res(None, Acknowledged),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(Success) => res(None, Acknowledged),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(Success) => res(None, Acknowledged),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(Success) => res(None, Acknowledged),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                sender_must_not_resend_negative_acknowledged,
-                [
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(Success) => res(None, Acknowledged),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                    ]
+                );
+                sm_test!(
+                    must_not_resend_negative_acknowledged,
+                    [
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(UnspecifiedError) => res(None, Rejected),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(UnspecifiedError) => res(None, Rejected),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(UnspecifiedError) => res(None, Rejected),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(AtLeastOnce, Automatic) => ok(),
-                    in_ack(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
-                ]
-            );
+                        out_pub(AtLeastOnce, Automatic) => ok(),
+                        in_ack(UnspecifiedError) => res(None, Rejected),
+                        reconnect(),
+                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                    ]
+                );
+            }
 
-            sm_test!(
-                receiver_automatic_must_acknowledge,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
+            mod receiver {
+                mod automatic {
+                    sm_test!(
+                        must_acknowledge,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_puback,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                            out_ack() => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_ack() => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_1,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_2,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_1,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_2,
+                        [
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                }
 
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_resend_puback,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                    out_ack() => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_ack() => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_resend_puback,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                    out_ack() => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_ack() => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_1,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_2,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_1,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_2,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_1,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_2,
-                [
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_1,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_2,
-                [
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
+                mod manual {
+                    sm_test!(
+                        must_acknowledge,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_puback,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                            out_ack() => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_ack() => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_1,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_2,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_1,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_2,
+                        [
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                }
+            }
         }
         mod qos2 {
-            sm_test!(
-                sender_automatic_must_resend_unacknowledged_publish,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_resend_unacknowledged_publish,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_publish_same_connection,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_publish_same_connection,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_acknowledged_publish_1,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_acknowledged_publish_2,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_acknowledged_publish_1,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_acknowledged_publish_2,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_negative_acknowledged_publish,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            mod sender {
+                mod automatic {
+                    sm_test!(
+                        must_resend_unacknowledged_publish,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_same_connection,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_acknowledged_publish_1,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_acknowledged_publish_2,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_negative_acknowledged_publish,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_negative_acknowledged_publish,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_release,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                        ]
+                    );
+                    // The following two test is deliberately not named "must" because the spec doesn't state that the sender
+                    // must not send a PUBREL, however this test case can be derived from this receiver section:
+                    // | If it has sent a PUBREC with a Reason Code of 0x80 or greater, the receiver MUST treat any subsequent
+                    // | PUBLISH packet that contains that Packet Identifier as being a new Application Message [MQTT-4.3.3-9].
+                    sm_test!(
+                        no_release_negative_acknowledgement,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_1,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            in_rec(Success) => res(Release(Success), Ignored),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_2,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            reconnect(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_3,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            reconnect(),
+                            in_rec(Success) => res(Release(Success), Ignored),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_no_entry_1,
+                        [
+                            in_rec(Success) => res(Release(PacketIdentifierNotFound), Ignored),
+                        ]
+                    );
 
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                    sm_test!(
+                        must_resend_unacknowledged_pubrel,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            reconnect(),
+                            out_rel() => ok(),
+                            reconnect(),
+                            out_rel() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_pubrel_same_connection,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            out_rel() => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_rel() => ok(),
+                            out_rel() => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_acknowledged_pubrel,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            in_comp(Success) => res(None, Completed),
+                            reconnect(),
+                            out_rel() => err(UnusedPacketIdentifier),
 
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_release,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_release,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                ]
-            );
-            // The following two tests are deliberately not named "must" because the spec doesn't state that the sender
-            // must not send a PUBREL, however these test cases can be derived from this receiver section:
-            // | If it has sent a PUBREC with a Reason Code of 0x80 or greater, the receiver MUST treat any subsequent
-            // | PUBLISH packet that contains that Packet Identifier as being a new Application Message [MQTT-4.3.3-9].
-            sm_test!(
-                sender_automatic_no_release_negative_acknowledgement,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                ]
-            );
-            sm_test!(
-                sender_manual_no_release_negative_acknowledgement,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(UnspecifiedError) => res(None, Rejected),
-                    out_rel() => err(UnusedPacketIdentifier),
-                ]
-            );
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            in_comp(Success) => res(None, Completed),
+                            out_rel() => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_rel() => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_1,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_2,
+                        [
+                            out_pub(ExactlyOnce, Automatic) => ok(),
+                            in_rec(Success) => res(Release(Success), Received(Automatic)),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                }
 
-            sm_test!(
-                sender_automatic_must_release_entry_1,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_release_entry_2,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    reconnect(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_release_entry_3,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    reconnect(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_release_entry_1,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_release_entry_2,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    reconnect(),
-                    in_rec(Success) => res(None, Received(Automatic)),
-                    out_rel() => ok(),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_release_entry_3,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Automatic)),
-                    out_rel() => ok(),
-                    reconnect(),
-                    in_rec(Success) => res(None, Received(Automatic)),
-                    out_rel() => ok(),
-                ]
-            );
+                mod manual {
+                    sm_test!(
+                        must_resend_unacknowledged_publish,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                        ]
+                    );
 
-            sm_test!(
-                sender_automatic_must_release_no_entry_1,
-                [
-                    in_rec(Success) => res(Release(Success), Ignored),
-                ]
-            );
+                    sm_test!(
+                        must_not_resend_publish_same_connection,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
 
-            sm_test!(
-                sender_automatic_must_resend_unacknowledged_pubrel,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    reconnect(),
-                    out_rel() => ok(),
-                    reconnect(),
-                    out_rel() => ok(),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_resend_unacknowledged_pubrel,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    reconnect(),
-                    out_rel() => ok(),
-                    reconnect(),
-                    out_rel() => ok(),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_pubrel_same_connection,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    out_rel() => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_rel() => ok(),
-                    out_rel() => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_pubrel_same_connection,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    out_rel() => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_rel() => ok(),
-                    out_rel() => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_acknowledged_pubrel,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    in_comp(Success) => res(None, Completed),
-                    reconnect(),
-                    out_rel() => err(UnusedPacketIdentifier),
+                    sm_test!(
+                        must_not_resend_acknowledged_publish_1,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_acknowledged_publish_2,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_negative_acknowledged_publish,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    in_comp(Success) => res(None, Completed),
-                    out_rel() => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_rel() => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_acknowledged_pubrel,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    in_comp(Success) => res(None, Completed),
-                    reconnect(),
-                    out_rel() => err(UnusedPacketIdentifier),
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
 
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    in_comp(Success) => res(None, Completed),
-                    out_rel() => err(UnusedPacketIdentifier),
-                    reconnect(),
-                    out_rel() => err(UnusedPacketIdentifier),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_publish_after_pubrel_1,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_automatic_must_not_resend_publish_after_pubrel_2,
-                [
-                    out_pub(ExactlyOnce, Automatic) => ok(),
-                    in_rec(Success) => res(Release(Success), Received(Automatic)),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_publish_after_pubrel_1,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_publish_after_pubrel_2,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    out_rel() => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_publish_after_pubrel_3,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    reconnect(),
-                    out_rel() => ok(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                sender_manual_must_not_resend_publish_after_pubrel_4,
-                [
-                    out_pub(ExactlyOnce, Manual) => ok(),
-                    in_rec(Success) => res(None, Received(Manual)),
-                    reconnect(),
-                    out_rel() => ok(),
-                    reconnect(),
-                    out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
-                ]
-            );
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_release,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                        ]
+                    );
+                    // The following two test is deliberately not named "must" because the spec doesn't state that the sender
+                    // must not send a PUBREL, however this test case can be derived from this receiver section:
+                    // | If it has sent a PUBREC with a Reason Code of 0x80 or greater, the receiver MUST treat any subsequent
+                    // | PUBLISH packet that contains that Packet Identifier as being a new Application Message [MQTT-4.3.3-9].
+                    sm_test!(
+                        no_release_negative_acknowledgement,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(UnspecifiedError) => res(None, Rejected),
+                            out_rel() => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_1,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            in_rec(Success) => res(Release(Success), Ignored),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_2,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            reconnect(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_release_entry_3,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            reconnect(),
+                            in_rec(Success) => res(None, Ignored),
+                            out_rel() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_resend_unacknowledged_pubrel,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            reconnect(),
+                            out_rel() => ok(),
+                            reconnect(),
+                            out_rel() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_pubrel_same_connection,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            out_rel() => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_rel() => ok(),
+                            out_rel() => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_acknowledged_pubrel,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            in_comp(Success) => res(None, Completed),
+                            reconnect(),
+                            out_rel() => err(UnusedPacketIdentifier),
 
-            sm_test!(
-                receiver_automatic_must_acknowledge_publish,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                ]
-            );
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            in_comp(Success) => res(None, Completed),
+                            out_rel() => err(UnusedPacketIdentifier),
+                            reconnect(),
+                            out_rel() => err(UnusedPacketIdentifier),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_1,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_2,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            out_rel() => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_3,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            reconnect(),
+                            out_rel() => ok(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_publish_after_pubrel_4,
+                        [
+                            out_pub(ExactlyOnce, Manual) => ok(),
+                            in_rec(Success) => res(None, Received(Manual)),
+                            reconnect(),
+                            out_rel() => ok(),
+                            reconnect(),
+                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                }
+            }
 
-            sm_test!(
-                receiver_automatic_must_not_resend_pubrec,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    out_rec(Success) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_rec(Success) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_resend_pubrec,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    out_rec(Success) => err(MismatchedHandshakeState),
-                    reconnect(),
-                    out_rec(Success) => err(MismatchedHandshakeState),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_erroneous_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(UnspecifiedError) => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_erroneous_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(UnspecifiedError) => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(UnspecifiedError) => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(UnspecifiedError) => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Manual)),
-                ]
-            );
+            mod receiver {
+                mod automatic {
+                    sm_test!(
+                        must_acknowledge_publish,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_pubrec,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            out_rec(Success) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_rec(Success) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_3,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_4,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_3,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_4,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_reconnect_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_reconnect_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_pubrel_regular_entry,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
 
-            sm_test!(
-                receiver_automatic_must_acknowledge_publish_before_pubrel_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_publish_before_pubrel_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_publish_before_pubrel_3,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_publish_before_pubrel_4,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_before_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_before_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_before_pubrec_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_before_pubrec_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_after_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_after_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_after_pubrec_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_publish_before_pubrel_after_pubrec_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                ]
-            );
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_negative_pubrel_entry,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
 
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_regular_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_regular_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_regular_3,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_regular_4,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_qos1_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_qos1_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_qos1_reconnect_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_not_cause_duplicate_qos1_reconnect_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Duplicate(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_before_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_before_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_before_pubrec_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_before_pubrec_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_after_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_after_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_after_pubrec_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_regular_after_pubrec_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_pubrel_regular_no_entry,
+                        [
+                            in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
 
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_before_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_before_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    in_pub(AtLeastOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_after_pubrec_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_after_pubrec_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_before_pubrec_after_reconnect_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_before_pubrec_after_reconnect_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_after_pubrec_after_reconnect_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Duplicate(Manual)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_not_cause_duplicate_qos1_after_pubrec_after_reconnect_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Automatic) => res(None, Duplicate(Manual)),
-                ]
-            );
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_negative_pubrel_no_entry,
+                        [
+                            in_rel(PacketIdentifierNotFound) => res(Complete(PacketIdentifierNotFound), Ignored),
 
-            sm_test!(
-                receiver_automatic_must_acknowledge_pubrel_regular_entry,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_3,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_4,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_5,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_6,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_1,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_2,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_3,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_4,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            reconnect(),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_5,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_6,
+                        [
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                }
 
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_negative_pubrel_entry,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
+                mod manual {
+                    sm_test!(
+                        must_acknowledge_publish_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_resend_pubrec,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            out_rec(Success) => err(MismatchedHandshakeState),
+                            reconnect(),
+                            out_rec(Success) => err(MismatchedHandshakeState),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_erroneous_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(UnspecifiedError) => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_erroneous_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(UnspecifiedError) => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(UnspecifiedError) => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(UnspecifiedError) => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_erroneous_pubrec_wrong_qos_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_before_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_before_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_before_pubrec_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_before_pubrec_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_after_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_after_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_after_pubrec_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_publish_before_pubrel_after_pubrec_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            out_rec(Success) => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_before_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_before_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_before_pubrec_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_before_pubrec_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_after_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_after_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_after_pubrec_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_regular_after_pubrec_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Manual)),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(None, Duplicate(Manual)),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_before_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_before_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_after_pubrec_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_after_pubrec_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_before_pubrec_after_reconnect_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_before_pubrec_after_reconnect_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_after_pubrec_after_reconnect_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_not_cause_duplicate_qos1_after_pubrec_after_reconnect_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Automatic) => res(Receive(PacketIdentifierInUse), Aborted),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_pubrel_regular_entry,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
 
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_pubrel_regular_no_entry,
-                [
-                    in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_negative_pubrel_entry,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(PacketIdentifierNotFound) => res(None, Aborted),
+                            out_comp() => ok(),
 
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_acknowledge_negative_pubrel_no_entry,
-                [
-                    in_rel(PacketIdentifierNotFound) => res(Complete(PacketIdentifierNotFound), Ignored),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(PacketIdentifierNotFound) => res(None, Aborted),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_pubrel_regular_no_entry,
+                        [
+                            in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
 
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_pubrel_regular_entry,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_acknowledge_negative_pubrel_no_entry,
+                        [
+                            in_rel(PacketIdentifierNotFound) => res(Complete(PacketIdentifierNotFound), Ignored),
 
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_negative_pubrel_entry,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(PacketIdentifierNotFound) => res(None, Aborted),
-                    out_comp() => ok(),
-
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(PacketIdentifierNotFound) => res(None, Aborted),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_pubrel_regular_no_entry,
-                [
-                    in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
-
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_acknowledge_negative_pubrel_no_entry,
-                [
-                    in_rel(PacketIdentifierNotFound) => res(Complete(PacketIdentifierNotFound), Ignored),
-
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_3,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_4,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_5,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos1_message_6,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_5,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_6,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_7,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos1_message_8,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    reconnect(),
-                    in_pub(AtLeastOnce, Manual) => res(None, Publish),
-                    out_ack() => ok(),
-                ]
-            );
-
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_1,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_2,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_3,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_4,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    reconnect(),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_5,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_automatic_must_accept_new_qos2_message_6,
-                [
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_1,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_2,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_3,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_4,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_5,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_6,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    reconnect(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_7,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                    in_rel(Success) => res(Complete(Success), Released(Automatic)),
-                ]
-            );
-            sm_test!(
-                receiver_manual_must_accept_new_qos2_message_8,
-                [
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                    reconnect(),
-                    in_pub(ExactlyOnce, Manual) => res(None, Publish),
-                    out_rec(Success) => ok(),
-                    in_rel(Success) => res(None, Released(Manual)),
-                    out_comp() => ok(),
-                ]
-            );
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_5,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_6,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_7,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos1_message_8,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            reconnect(),
+                            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+                            out_ack() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_1,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_2,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_3,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_4,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_5,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_6,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            reconnect(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                    sm_test!(
+                        must_accept_new_qos2_message_7,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+                            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+                        ]
+                    );
+                    sm_test!(must_accept_new_qos2_message_8,
+                        [
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                            reconnect(),
+                            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+                            out_rec(Success) => ok(),
+                            in_rel(Success) => res(None, Released(Manual)),
+                            out_comp() => ok(),
+                        ]
+                    );
+                }
+            }
         }
     }
     mod local_error_prevention {
@@ -2033,35 +2056,528 @@ mod unit {
         // Buffer exceedance
     }
 
-    // Other tests
-    // incoming other Manual/Automatic PUBLISH packets should not alter the original AckMode
-    // (should be covered plentily by other tests above, perhaps still to be covered for manual QoS 1 that hasnt sent the PUBACK yet)
-    //
-    // Strict spec interpretation:
-    // Reject incoming PUBACK/PUBREC/PUBCOMP directly after reconnect before REPUBLISH/PUBREL has been sent
-    // Do not accept incoming PUBLISH packets after having received the PUBREL and before having sent PUBCOMP
-    //
-    // In this scenario: only negative acknowledgement allowed
-    // in_pub(ExactlyOnce, Manual) => res(None, Publish),
-    // in_pub(AtLeastOnce, Manual) => res(None, Duplicate(Automatic)),
-    //
-    // Must not reply with wrong acknowledgment packet types in general (only to be checked for manual, because the user can do wrong in this case)
+    sm_test!(
+        // All other cases but this one should be plentily covered by the spec tests
+        republish_cant_change_ack_mode,
+        [
+            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+            in_pub(AtLeastOnce, Automatic) => res(None, Publish),
+            reconnect(),
+            in_pub(AtLeastOnce, Automatic) => res(None, Publish),
+            out_ack() => ok(),
+        ]
+    );
 
     sm_test!(
-        pid_not_in_use,
+        receiver_not_accept_publish_after_pubrel_1,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            in_rel(Success) => res(None, Released(Manual)),
+            in_pub(ExactlyOnce, Manual) => res(Disconnect(ProtocolError), ServerError),
+        ]
+    );
+    sm_test!(
+        receiver_not_accept_publish_after_pubrel_2,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            in_rel(Success) => res(None, Released(Manual)),
+            in_pub(ExactlyOnce, Automatic) => res(Disconnect(ProtocolError), ServerError),
+        ]
+    );
+
+    sm_test!(
+        no_acks_out_of_thin_air,
         [
             out_ack() => err(UnusedPacketIdentifier),
             out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
             out_rel() => err(UnusedPacketIdentifier),
             out_comp() => err(UnusedPacketIdentifier),
-            in_ack(Success) => res(None, Ignored),
-            in_ack(TopicNameInvalid) => res(None, Ignored),
-            in_rec(Success) => res(Release(PacketIdentifierNotFound), Ignored),
-            in_rec(TopicNameInvalid) => res(Release(PacketIdentifierNotFound), Ignored),    // This is matching state, server doesn't know this PID and neither do we
-            in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
-            in_rel(PacketIdentifierNotFound) => res(None, Ignored),
-            in_comp(Success) => res(None, Ignored),
-            in_comp(TopicNameInvalid) => res(None, Ignored),
+        ]
+    );
+
+    sm_test!(
+        sender_automatic_no_qos1_publish_retransmit,
+        [
+            out_pub(AtLeastOnce, Automatic) => ok(),
+            out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+            reconnect(),
+            out_repub(AtLeastOnce) => ok(),
+            out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+            in_ack(Success) => res(None, Acknowledged),
+            out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+
+            out_pub(AtLeastOnce, Automatic) => ok(),
+            in_ack(UnspecifiedError) => res(None, Rejected),
+            out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+        ]
+    );
+
+    sm_test!(
+        sender_automatic_no_qos2_publish_retransmit,
+        [
+            out_pub(ExactlyOnce, Automatic) => ok(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            reconnect(),
+            out_repub(ExactlyOnce) => ok(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            in_rec(Success) => res(Release(Success), Received(Automatic)),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            reconnect(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            in_comp(Success) => res(None, Completed),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+
+            out_pub(ExactlyOnce, Automatic) => ok(),
+            in_rec(UnspecifiedError) => res(None, Rejected),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+
+            out_pub(ExactlyOnce, Automatic) => ok(),
+            in_rec(Success) => res(Release(Success), Received(Automatic)),
+            reconnect(),
+            in_comp(Success) => res(None, Completed),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        sender_manual_no_qos2_publish_retransmit,
+        [
+            out_pub(ExactlyOnce, Manual) => ok(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            reconnect(),
+            out_repub(ExactlyOnce) => ok(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            in_rec(Success) => res(None, Received(Manual)),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            reconnect(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_rel() => ok(),
+            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            in_comp(Success) => res(None, Completed),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+
+            out_pub(ExactlyOnce, Manual) => ok(),
+            in_rec(UnspecifiedError) => res(None, Rejected),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+
+            out_pub(ExactlyOnce, Manual) => ok(),
+            in_rec(Success) => res(None, Received(Manual)),
+            out_rel() => ok(),
+            reconnect(),
+            in_comp(Success) => res(None, Completed),
+            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+        ]
+    );
+
+    sm_test!(
+        sender_automatic_no_pubrel_retransmit,
+        [
+            out_pub(ExactlyOnce, Automatic) => ok(),
+            in_rec(Success) => res(Release(Success), Received(Automatic)),
+            out_rel() => err(MismatchedHandshakeState),
+            reconnect(),
+            out_rel() => ok(),
+            out_rel() => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        sender_manual_no_pubrel_retransmit,
+        [
+            out_pub(ExactlyOnce, Manual) => ok(),
+            in_rec(Success) => res(None, Received(Manual)),
+            out_rel() => ok(),
+            out_rel() => err(MismatchedHandshakeState),
+            reconnect(),
+            out_rel() => ok(),
+            out_rel() => err(MismatchedHandshakeState),
+        ]
+    );
+
+    sm_test!(
+        receiver_automatic_no_puback_retransmit,
+        [
+            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+            out_ack() => err(UnusedPacketIdentifier),
+
+            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_puback_retransmit,
+        [
+            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+            out_ack() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+
+            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+            out_ack() => ok(),
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+        ]
+    );
+
+    sm_test!(
+        receiver_automatic_no_pubrec_retransmit_1,
+        [
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        receiver_automatic_no_pubrec_retransmit_2,
+        [
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+            reconnect(),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_erroneous_pubrec_retransmit,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(UnspecifiedError) => ok(),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(UnspecifiedError) => ok(),
+            reconnect(),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_pubrec_retransmit_1,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            out_rec(Success) => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_pubrec_retransmit_2,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            reconnect(),
+            out_rec(Success) => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_pubrec_reconnect_retransmit,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            reconnect(),
+            out_rec(Success) => err(MismatchedHandshakeState),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_erroneous_pubrec_reconnect_retransmit,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            reconnect(),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+        ]
+    );
+
+    sm_test!(
+        receiver_automatic_no_pubcomp_retransmit,
+        [
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+            reconnect(),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_pubcomp_retransmit,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            in_rel(Success) => res(None, Released(Manual)),
+            out_comp() => ok(),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            in_rel(Success) => res(None, Released(Manual)),
+            out_comp() => ok(),
+            reconnect(),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_rec(Success) => ok(),
+            in_rel(Success) => res(None, Released(Manual)),
+            reconnect(),
+            out_comp() => err(MismatchedHandshakeState),
+        ]
+    );
+
+    sm_test!(
+        sender_no_incorrect_acknowledgement_qos1,
+        [
+            out_pub(AtLeastOnce, Automatic) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedQoS),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedQoS),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_repub(AtLeastOnce) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedQoS),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_ack(Success) => res(None, Acknowledged),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        sender_automatic_no_incorrect_acknowledgement_qos2,
+        [
+            out_pub(ExactlyOnce, Automatic) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_repub(ExactlyOnce) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_rec(Success) => res(Release(Success), Received(Automatic)),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_rel() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_comp(Success) => res(None, Completed),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        sender_manual_no_incorrect_acknowledgement_qos2,
+        [
+            out_pub(ExactlyOnce, Manual) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_repub(ExactlyOnce) => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_rec(Success) => res(None, Received(Manual)),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_rel() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            out_rel() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(MismatchedHandshakeState),
+            out_comp() => err(UnusedPacketIdentifier),
+
+            in_comp(Success) => res(None, Completed),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_incorrect_acknowledgement_qos1,
+        [
+            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+            out_rec(Success) => err(MismatchedQoS),
+            out_rec(UnspecifiedError) => err(MismatchedQoS),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedQoS),
+
+            reconnect(),
+            out_ack() => err(MismatchedHandshakeState),
+            out_rec(Success) => err(MismatchedQoS),
+            out_rec(UnspecifiedError) => err(MismatchedQoS),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedQoS),
+
+            in_pub(AtLeastOnce, Manual) => res(None, Publish),
+            out_ack() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_automatic_no_incorrect_acknowledgement_qos2,
+        [
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            reconnect(),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            in_rel(Success) => res(Complete(Success), Released(Automatic)),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
+        ]
+    );
+    sm_test!(
+        receiver_manual_no_incorrect_acknowledgement_qos2,
+        [
+            in_pub(ExactlyOnce, Manual) => res(None, Publish),
+            out_ack() => err(MismatchedQoS),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            reconnect(),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
+            out_ack() => err(MismatchedQoS),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            out_rec(Success) => ok(),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            in_rel(Success) => res(None, Released(Manual)),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+
+            reconnect(),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(MismatchedHandshakeState),
+
+            in_rel(Success) => res(None, Released(Manual)),
+            out_ack() => err(MismatchedQoS),
+            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rel() => err(UnusedPacketIdentifier),
+
+            out_comp() => ok(),
+            out_ack() => err(UnusedPacketIdentifier),
+            out_rec(Success) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rel() => err(UnusedPacketIdentifier),
+            out_comp() => err(UnusedPacketIdentifier),
         ]
     );
 
@@ -2140,284 +2656,6 @@ mod unit {
             assert_eq!(r, Response::Acknowledge(ReasonCode::Success));
             assert_eq!(e, Event::Publish);
         }
-
-        assert!(sm.inbound_publishes.is_empty());
-    }
-
-    sm_test!(
-        inbound_qos1_auto_full_macro,
-        [
-            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
-            in_ack(Success) => res(None, Ignored),
-            in_ack(TopicNameInvalid) => res(None, Ignored),
-            in_rec(Success) => res(Release(PacketIdentifierNotFound), Ignored),
-            in_rec(TopicNameInvalid) => res(Release(PacketIdentifierNotFound), Ignored),
-            in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
-            in_rel(PacketIdentifierNotFound) => res(None, Ignored),
-            in_comp(Success) => res(None, Ignored),
-            in_comp(PacketIdentifierNotFound) => res(None, Ignored),
-
-            // Republish is allowed and should lead to duplicate delivery
-            in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-
-            in_pub(AtLeastOnce, Manual) => res(None, Publish),
-            reconnect(),
-            in_pub(AtLeastOnce, Automatic) => res(None, Publish),
-
-            out_ack() => ok(),
-
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
-            in_ack(Success) => res(None, Ignored),
-            in_ack(TopicNameInvalid) => res(None, Ignored),
-            in_rec(Success) => res(Release(PacketIdentifierNotFound), Ignored),
-            in_rec(TopicNameInvalid) => res(Release(PacketIdentifierNotFound), Ignored),
-            in_rel(Success) => res(Complete(PacketIdentifierNotFound), Ignored),
-            in_rel(PacketIdentifierNotFound) => res(None, Ignored),
-            in_comp(Success) => res(None, Ignored),
-            in_comp(PacketIdentifierNotFound) => res(None, Ignored),
-        ]
-    );
-
-    #[test_log::test]
-    #[test]
-    fn inbound_qos1_auto_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        // Receive the QoS 1 PUBLISH
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Acknowledge(ReasonCode::Success));
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound); // This is matching state, server doesn't know this PID and neither do we
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Republish is allowed and should lead to duplicate delivery
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Acknowledge(ReasonCode::Success));
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-
-        // A republish with manual set to false should use the old manual setting
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound); // This is matching state, server doesn't know this PID and neither do we
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn inbound_qos1_manual_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        // Receive the QoS 1 PUBLISH
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Republish is allowed and should lead to duplicate delivery
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Complete the handshake
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Ok(()));
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Ok(()));
 
         assert!(sm.inbound_publishes.is_empty());
     }
@@ -2530,13 +2768,6 @@ mod unit {
             assert_eq!(e, Event::Duplicate(AckMode::Manual));
         }
 
-        // Sending the PUBREL before PUBREC is received by the server is an error
-        for pid in pids.iter().copied() {
-            let (r, e) = sm.inbound_pubrel(pid, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-        }
-
         // Invalid client actions should not be allowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
@@ -2606,425 +2837,6 @@ mod unit {
 
     #[test_log::test]
     #[test]
-    fn inbound_qos2_auto_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        // Receive the QoS 2 PUBLISH
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Receive(ReasonCode::Success));
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Republish is allowed and should lead to duplicate delivery
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Receive(ReasonCode::Success));
-        assert_eq!(e, Event::Duplicate(AckMode::Automatic));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Proceed to the next handshake state
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::Success));
-        assert_eq!(e, Event::Released(AckMode::Automatic));
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn inbound_qos2_manual_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        // Receive the QoS 2 PUBLISH
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Republish is allowed and should lead to duplicate delivery
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Duplicate(AckMode::Manual));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Proceed to the next handshake state
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Republish is allowed and should lead to duplicate delivery
-        sm.reconnect();
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Duplicate(AckMode::Manual));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Proceed to the next handshake state
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Ok(()));
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Released(AckMode::Manual));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Release(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::AtLeastOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Republish should not be allowed now
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Duplicate PUBREL should be allowed
-        sm.reconnect();
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Released(AckMode::Manual));
-
-        assert!(sm.outbound_publishes.is_empty());
-
-        // Complete the handshake
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.outbound_publishes.is_empty());
-        assert!(sm.inbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn inbound_qos2_error_abort() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Manual);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Publish);
-
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Ok(()));
-
-        // Handle this relatively lax by removing the state
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Aborted);
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-
-        let (r, e) = sm.inbound_publish(IdentifiedQoS::ExactlyOnce(PID), AckMode::Automatic);
-        assert_eq!(r, Response::Receive(ReasonCode::Success));
-        assert_eq!(e, Event::Publish);
-
-        // Handle this relatively lax by removing the state
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Aborted);
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
     fn outbound_qos1() {
         let mut sm = Session::<10, 10, 10>::default();
 
@@ -3079,85 +2891,6 @@ mod unit {
 
     #[test_log::test]
     #[test]
-    fn outbound_qos1_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        let r = sm
-            .free_handle()
-            .unwrap()
-            .outbound_publish(QoS::AtLeastOnce, AckMode::Automatic);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::MismatchedQoS));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        // Complete the handshake
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Acknowledged);
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos1_error_reject() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        let r = sm
-            .free_handle()
-            .unwrap()
-            .outbound_publish(QoS::AtLeastOnce, AckMode::Automatic);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Reject the publication
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Rejected);
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
     fn outbound_qos2_auto() {
         let mut sm = Session::<10, 10, 10>::default();
 
@@ -3204,9 +2937,6 @@ mod unit {
         // Invalid server actions should lead to disconnect
         for pid in pids.iter().copied() {
             let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubrec(pid, ReasonCode::Success);
             assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
             assert_eq!(e, Event::ServerError);
         }
@@ -3277,9 +3007,6 @@ mod unit {
             let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
             assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
             assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
             let (r, e) = sm.inbound_pubcomp(pid, ReasonCode::Success);
             assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
             assert_eq!(e, Event::ServerError);
@@ -3302,9 +3029,6 @@ mod unit {
             let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
             assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
             assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
         }
 
         // Republishing at this stage should be disallowed
@@ -3320,365 +3044,6 @@ mod unit {
             assert_eq!(e, Event::Completed);
         }
 
-        assert!(sm.outbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos2_auto_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        let r = sm
-            .free_handle()
-            .unwrap()
-            .outbound_publish(QoS::ExactlyOnce, AckMode::Automatic);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Republish should be allowed
-        sm.reconnect();
-        let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(PID));
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Proceed to the next handshake state
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Release(ReasonCode::Success));
-        assert_eq!(e, Event::Received(AckMode::Automatic));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Republish should not be allowed after sending PUBREL
-        let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(PID));
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Rerelease should be allowed
-        sm.reconnect();
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Complete the handshake
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Completed);
-
-        assert!(sm.inbound_publishes.is_empty());
-        assert!(sm.outbound_publishes.is_empty());
-    }
-
-    #[test_log::test]
-    #[test]
-    fn outbound_qos2_manual_full() {
-        let mut sm = Session::<10, 10, 10>::default();
-
-        const PID: PacketIdentifier = PacketIdentifier::ONE;
-
-        let r = sm
-            .free_handle()
-            .unwrap()
-            .outbound_publish(QoS::ExactlyOnce, AckMode::Manual);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Republish should be allowed
-        sm.reconnect();
-        let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(PID));
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Proceed to the next handshake state
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Received(AckMode::Manual));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Republish should not be allowed after sending PUBREL
-        let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(PID));
-        assert_eq!(r, Err(StateError::MismatchedHandshakeState));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Rerelease should be allowed
-        let r = sm.outbound_pubrel(PID);
-        assert_eq!(r, Ok(()));
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Invalid client & server actions should not be allowed
-        let r = sm.outbound_puback(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-        let r = sm.outbound_pubcomp(PID);
-        assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
-
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_puback(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-        let (r, e) = sm.inbound_pubrec(PID, ReasonCode::TopicNameInvalid);
-        assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-        assert_eq!(e, Event::ServerError);
-
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::Success);
-        assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
-        assert_eq!(e, Event::Ignored);
-        let (r, e) = sm.inbound_pubrel(PID, ReasonCode::PacketIdentifierNotFound);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Ignored);
-
-        assert!(sm.inbound_publishes.is_empty());
-
-        // Complete the handshake
-        let (r, e) = sm.inbound_pubcomp(PID, ReasonCode::Success);
-        assert_eq!(r, Response::None);
-        assert_eq!(e, Event::Completed);
-
-        assert!(sm.inbound_publishes.is_empty());
         assert!(sm.outbound_publishes.is_empty());
     }
 

@@ -18,7 +18,7 @@ use crate::{
     header::{FixedHeader, PacketType},
     io::Transport,
     packet::{Packet, TxPacket},
-    session::{Event as SmEvent, Response, Session, StateError},
+    session::{Event as SmEvent, LocalPublishState, Response, Session, StateError},
     types::{
         IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, PacketIdentifier, QoS, ReasonCode,
         SubscriptionFilter, TopicFilter, TopicName, VarByteInt,
@@ -74,7 +74,7 @@ pub struct Client<
 
     raw: Raw<'c, N, B>,
 
-    manually_ack_on:
+    manual_ack_when:
         &'c dyn Fn(&Publish<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>) -> bool,
 }
 
@@ -164,7 +164,7 @@ impl<
             // sm: todo!(),
             raw: Raw::new_disconnected(buffer),
 
-            manually_ack_on: &|_| false,
+            manual_ack_when: &|_| false,
         }
     }
 
@@ -183,13 +183,13 @@ impl<
     /// are executed automatically by the client or manually by the user. If the predicate returns
     /// [`true`] for an incoming [`QoS::AtLeastOnce`] or [`QoS::ExactlyOnce`] PUBLISH packet, its
     /// handshake flow will be acknowledged automatically.
-    pub fn manually_ack_on(
+    pub fn ack_manually_when(
         &mut self,
         predicate: &'c dyn Fn(
             &Publish<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
         ) -> bool,
     ) {
-        self.manually_ack_on = predicate;
+        self.manual_ack_when = predicate;
     }
 
     /// Returns the amount of publications the client is allowed to make according to the server's
@@ -451,6 +451,7 @@ impl<
                 info!("connected to server and reconnected to session");
                 self.session.reconnect();
             } else {
+                #[expect(clippy::if_same_then_else)]
                 if options.clean_start {
                     info!("connected to server.");
                 } else {
@@ -764,11 +765,11 @@ impl<
             MAX_USER_PROPERTIES
         );
 
-        debug_assert!(
-            !(matches!(options.qos, QoS::AtMostOnce | QoS::AtLeastOnce)
-                && options.ack_mode == AckMode::Manual),
-            "Manual acknowledgement mode has no effect on quality of service 0 or 1 publications"
-        );
+        if (matches!(options.qos, QoS::AtMostOnce | QoS::AtLeastOnce)
+            && options.ack_mode == AckMode::Manual)
+        {
+            return Err(MqttError::ManualAckImpossible);
+        }
 
         if options.qos > self.server_config.maximum_qos {
             return Err(MqttError::UnsupportedByServer);
@@ -1051,7 +1052,9 @@ impl<
         };
 
         loop {
-            if handle.outbound_pubrel().is_ok() {
+            if handle.state == LocalPublishState::DueReRel(AckMode::Automatic) {
+                handle.outbound_pubrel().unwrap();
+
                 let pubrel =
                     PubrelPacket::<0>::minimal(handle.packet_identifier(), ReasonCode::Success);
 
@@ -1609,7 +1612,7 @@ impl<
                     message: publish.message,
                 };
 
-                let ack_mode = if (self.manually_ack_on)(&publish) {
+                let ack_mode = if (self.manual_ack_when)(&publish) {
                     AckMode::Manual
                 } else {
                     AckMode::Automatic
@@ -1866,7 +1869,9 @@ impl<
                     SmEvent::Acknowledged => unreachable!(),
                     SmEvent::Received(_) => unreachable!(),
                     SmEvent::Released(_) => unreachable!(),
-                    SmEvent::Completed => Event::PublishComplete(Puback::new(pubcomp, AckMode::default())),
+                    SmEvent::Completed => {
+                        Event::PublishComplete(Puback::new(pubcomp, AckMode::default()))
+                    }
                     SmEvent::ServerError => return Err(MqttError::Server),
                 }
             }

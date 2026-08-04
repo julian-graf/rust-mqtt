@@ -103,7 +103,7 @@ impl<'p> Options<'p> {
 
     /// Sets the acknowledgement mode to manual acknowledgements.
     #[must_use]
-    pub const fn manual_ack(mut self) -> Self {
+    pub const fn ack_manually(mut self) -> Self {
         self.ack_mode = AckMode::Manual;
         self
     }

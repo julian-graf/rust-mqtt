@@ -33,7 +33,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
         assert_ne!(qos, QoS::AtMostOnce, "QoS 0 is not to be tracked");
         assert!(
             !(qos == QoS::AtLeastOnce && ack_mode.is_manual()),
-            "QoS 1 is not to be tracked"
+            "outbound QoS 1 does not have acknowledgements"
         );
 
         if self.session.available_outbound_publish_capacity() {
@@ -112,18 +112,37 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
         self.session.inbound_publishes.swap_remove(self.i);
     }
 
-    pub(crate) fn inbound_republish(&mut self, qos: QoS) -> (Response, Event) {
+    pub(crate) fn inbound_republish(mut self, qos: QoS) -> (Response, Event) {
         match qos {
             QoS::AtMostOnce => panic!("QoS 0 has no packet identifier, so this call is incorrect"),
             QoS::AtLeastOnce => match self.state {
-                PeerPublishState::DueAck
-                | PeerPublishState::AwaitPublishExactlyOnce(_)
+                // In the case of `DueComp` we have received the PUBREL already, so MQTT-4.3.3-10 does
+                // not apply here:
+                // | Until it has received the corresponding PUBREL packet, the receiver MUST acknowledge
+                // | any subsequent PUBLISH packet with the same Packet Identifier by sending a PUBREC.
+                //
+                // However, we still send the same erroneous PUBREC in that case to tell the peer about
+                // the mismatch.
+                PeerPublishState::AwaitPublishExactlyOnce(_)
                 | PeerPublishState::DueRec
                 | PeerPublishState::AwaitRel(_)
-                | PeerPublishState::DueComp => (
-                    Response::Disconnect(ReasonCode::ProtocolError),
-                    Event::ServerError,
-                ),
+                | PeerPublishState::DueComp => {
+                    self.remove();
+                    (
+                        Response::Receive(ReasonCode::PacketIdentifierInUse),
+                        Event::Aborted,
+                    )
+                }
+
+                // The user has not yet sent the manual PUBACK so we leave it up to them.
+                // We could consider emitting a duplicate event here because we haven't sent
+                // the PUBACK yet undermining the condition of the following normative statement:
+                // | After it has sent a PUBACK packet the receiver MUST treat any incoming PUBLISH
+                // | packet that contains the same Packet Identifier as being a new Application Message,
+                // | irrespective of the setting of its DUP flag [MQTT-4.3.2-5].
+                //
+                // However, we can still let this message through, which we do.
+                PeerPublishState::DueAck => (Response::None, Event::Publish),
                 PeerPublishState::AwaitPublishAtLeastOnce => {
                     self.set(PeerPublishState::DueAck);
 
@@ -131,14 +150,38 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 }
             },
             QoS::ExactlyOnce => match self.state {
-                PeerPublishState::AwaitPublishAtLeastOnce
-                | PeerPublishState::DueAck
-                | PeerPublishState::DueRec
-                | PeerPublishState::AwaitRel(_)
-                | PeerPublishState::DueComp => (
+                PeerPublishState::AwaitPublishAtLeastOnce | PeerPublishState::DueAck => {
+                    self.remove();
+                    (
+                        Response::Acknowledge(ReasonCode::PacketIdentifierInUse),
+                        Event::Aborted,
+                    )
+                }
+
+                // The user has not yet sent the manual PUBREC so we leave it up to them.
+                // The PUBLISH has not driven the state forward, so an ignored event would
+                // be fitting, but duplicate matches better here.
+                PeerPublishState::DueRec => (Response::None, Event::Duplicate(AckMode::Manual)),
+
+                // The user has already sent a PUBREC packet, so we send this PUBREC
+                // automatically.
+                PeerPublishState::AwaitRel(mode) => (
+                    Response::Receive(ReasonCode::Success),
+                    Event::Duplicate(mode),
+                ),
+
+                // The peer has already sent a PUBREL packet so it must not resend the PUBLISH
+                // packet. We have not yet sent a PUBCOMP packet so this PUBLISH also can't be
+                // a new application message that reuses the same packet identifier. This is a
+                // clear protocol error.
+                PeerPublishState::DueComp => (
                     Response::Disconnect(ReasonCode::ProtocolError),
                     Event::ServerError,
                 ),
+
+                // If the user has already sent a PUBREC packet, the state would be awaiting
+                // the PUBREL packet. Therefore we can safely delegate the responsibility for
+                // the PUBREC to the user instead of sending it automatically.
                 PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual) => {
                     self.set(PeerPublishState::DueRec);
 
@@ -194,41 +237,73 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
 
     pub(crate) fn inbound_pubrel(mut self, reason_code: ReasonCode) -> (Response, Event) {
         match self.state {
-            PeerPublishState::AwaitPublishAtLeastOnce | PeerPublishState::DueAck => {
-                // QoS mismatch -> the spec doesn't state what to do here nor
-                // is there a fitting reason code we could use in a PUBCOMP
-                (
-                    Response::Disconnect(ReasonCode::ProtocolError),
-                    Event::ServerError,
-                )
-            }
-            PeerPublishState::DueRec | PeerPublishState::DueComp => {
-                // Handshake state mismatch -> the spec doesn't state what to do here
-                // nor is there a fitting reason code we could use in a PUBCOMP
-                (
-                    Response::Disconnect(ReasonCode::ProtocolError),
-                    Event::ServerError,
-                )
-            }
-            PeerPublishState::AwaitPublishExactlyOnce(mode) | PeerPublishState::AwaitRel(mode) => {
-                // The reason code in this case can only be PacketIdentifierNotFound
-                if reason_code.is_erroneous() {
-                    // The server hasn't found the PID of a PUBREC packet of ours.
-                    // This means it doesn't track its original PUBLISH anymore.
-                    // -> remove this session state
-                    self.remove();
+            // QoS mismatch, the spec doesn't state what to do here. We could
+            // - disconnect due to a protocol error (ReasonCode::PacketIdentifierInUse is not allowed for DISCONNECT packets)
+            // - send a PUBCOMP, but the only allowed ReasonCode::PacketIdentifierNotFound is not fitting
+            PeerPublishState::AwaitPublishAtLeastOnce | PeerPublishState::DueAck => (
+                Response::Disconnect(ReasonCode::ProtocolError),
+                Event::ServerError,
+            ),
 
-                    (Response::None, Event::Aborted)
-                } else if mode.is_manual() {
+            // // The user has not yet sent the manual PUBREL so we leave it up to them.
+            // // We do not emit the `Received` event because the user has already seen
+            // // that event and this PUBREC has not driven the state forward.
+            //
+            // PeerPublishState::DueRec => (Response::Disconnect(ReasonCode::ProtocolError), Event::ServerError),
+
+            // This state means we have never sent a PUBREC and therefore the peer should
+            // not have sent a PUBREL. We have two options:
+            // - Accept the release and move the session state forward despite having
+            //   skipped the PUBREC. After all, we already delivered the message.
+            // - Disconnect due to a protocol error. This risks that the session entry on
+            //   our end becomes stale (especially if the reason code of this PUBREL is
+            //   negative) because the peer has removed their entry and won't resend the
+            //   PUBLISH or PUBREL packet
+            PeerPublishState::DueRec if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::Complete(ReasonCode::Success), Event::Aborted)
+            }
+            PeerPublishState::DueRec => {
+                self.set(PeerPublishState::DueComp);
+                (Response::None, Event::Released(AckMode::Manual))
+            }
+
+
+            PeerPublishState::DueComp if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::Complete(ReasonCode::Success), Event::Aborted)
+            }
+            PeerPublishState::DueComp => (Response::None, Event::Aborted),
+
+            PeerPublishState::AwaitPublishExactlyOnce(mode) | PeerPublishState::AwaitRel(mode)
+                if reason_code.is_erroneous() =>
+            {
+                // The reason code in this case can only be PacketIdentifierNotFound
+
+                // The server hasn't found the PID of a PUBREC packet of ours.
+                // This means it doesn't track its original PUBLISH anymore.
+                // We still have to respond with a PUBCOMP.
+                if mode.is_manual() {
                     self.set(PeerPublishState::DueComp);
-                    (Response::None, Event::Released(mode))
+                    (Response::None, Event::Aborted)
                 } else {
                     self.remove();
-                    (
-                        Response::Complete(ReasonCode::Success),
-                        Event::Released(mode),
-                    )
+                    (Response::Complete(ReasonCode::Success), Event::Aborted)
                 }
+            }
+
+            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic)
+            | PeerPublishState::AwaitRel(AckMode::Automatic) => {
+                self.remove();
+                (
+                    Response::Complete(ReasonCode::Success),
+                    Event::Released(AckMode::Automatic),
+                )
+            }
+            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual)
+            | PeerPublishState::AwaitRel(AckMode::Manual) => {
+                self.set(PeerPublishState::DueComp);
+                (Response::None, Event::Released(AckMode::Manual))
             }
         }
     }
@@ -294,8 +369,8 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
     pub(crate) fn outbound_republish(&mut self, qos: QoS) -> Result<(), StateError> {
         match qos {
             QoS::AtMostOnce => {
-                panic!("QoS 0 has no packet identifier, so this call is incorrect")
-            },
+                panic!("QoS 0 has no packet identifier, so this call is incorrect");
+            }
             QoS::AtLeastOnce => match self.state {
                 LocalPublishState::DuePublishAtLeastOnce => {
                     self.set(LocalPublishState::AwaitAck);
@@ -304,7 +379,8 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 LocalPublishState::AwaitAck => Err(StateError::MismatchedHandshakeState),
                 LocalPublishState::DuePublishExactlyOnce(_)
                 | LocalPublishState::AwaitRec(_)
-                | LocalPublishState::DueRel(_)
+                | LocalPublishState::DueRel
+                | LocalPublishState::DueReRel(_)
                 | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedQoS),
             },
             QoS::ExactlyOnce => match self.state {
@@ -312,7 +388,8 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                     Err(StateError::MismatchedQoS)
                 }
                 LocalPublishState::AwaitRec(_)
-                | LocalPublishState::DueRel(_)
+                | LocalPublishState::DueRel
+                | LocalPublishState::DueReRel(_)
                 | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedHandshakeState),
                 LocalPublishState::DuePublishExactlyOnce(mode) => {
                     self.set(LocalPublishState::AwaitRec(mode));
@@ -324,7 +401,13 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
 
     pub(crate) fn inbound_puback(self, reason_code: ReasonCode) -> (Response, Event) {
         match self.state {
-            LocalPublishState::AwaitAck => {
+            // According to the spec, we MUST retransmit our PUBLISH packet on reconnect,
+            // however, for QoS 2 we also accept a PUBREC in the counterpart of this state.
+            //
+            // The peer should not have sent a PUBACK on reconnect, but our priority is
+            // not remote spec enforcement but reliable delivery. The receival of this
+            // PUBACK proves that the peer took ownership of the message and delivered it.
+            LocalPublishState::DuePublishAtLeastOnce | LocalPublishState::AwaitAck => {
                 self.remove();
 
                 let e = if reason_code.is_success() {
@@ -334,10 +417,12 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 };
                 (Response::None, e)
             }
-            LocalPublishState::DuePublishAtLeastOnce
-            | LocalPublishState::DuePublishExactlyOnce(_)
+
+            // Mismatched QoS
+            LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
-            | LocalPublishState::DueRel(_)
+            | LocalPublishState::DueRel
+            | LocalPublishState::DueReRel(_)
             | LocalPublishState::AwaitComp(_) => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
@@ -347,28 +432,87 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
 
     pub(crate) fn inbound_pubrec(mut self, reason_code: ReasonCode) -> (Response, Event) {
         match self.state {
-            LocalPublishState::DuePublishAtLeastOnce
-            | LocalPublishState::AwaitAck
-            | LocalPublishState::DuePublishExactlyOnce(_)
-            | LocalPublishState::DueRel(_)
-            | LocalPublishState::AwaitComp(_) => (
+            // Mismatched QoS
+            LocalPublishState::DuePublishAtLeastOnce | LocalPublishState::AwaitAck => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
             ),
-            LocalPublishState::AwaitRec(mode) => {
-                if reason_code.is_success() {
-                    let r = if mode.is_manual() {
-                        self.set(LocalPublishState::DueRel(AckMode::Manual));
-                        Response::None
-                    } else {
-                        self.set(LocalPublishState::AwaitComp(AckMode::Automatic));
-                        Response::Release(ReasonCode::Success)
-                    };
-                    (r, Event::Received(mode))
-                } else {
-                    self.remove();
-                    (Response::None, Event::Rejected)
-                }
+
+            // Ideally, this state doesn't exist when a PUBREC is received because
+            // - on reconnection, all PUBLISH packets should be resent immediately
+            // and
+            // - the peer must not send a PUBREC packet "out of thin air" after a
+            //   reconnection.
+            //
+            // So we act to stay as conform to the spec as possible. Relevant
+            // normative statements:
+            // | The sender MUST send a PUBREL packet when it receives a PUBREC packet from the receiver with a Reason Code value less than 0x80 [MQTT-4.3.3-4].
+            // | The sender MUST NOT re-send the PUBLISH once it has sent the corresponding PUBREL packet [MQTT-4.3.3-6].
+            // | On reconnection, the sender MUST resend any unacknowledged PUBLISH packets [MQTT-4.4.0-1].
+            //
+            // In our case, after having sent the mandatory PUBREL packet, we treat
+            // the PUBLISH packet as acknowledged, which means we don't need to
+            // (and must not) resend the PUBLISH packet, which we wouldn't be
+            // allowed to anyway because we have sent the PUBREL already.
+            LocalPublishState::DuePublishExactlyOnce(_) if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::None, Event::Rejected)
+            }
+            LocalPublishState::DuePublishExactlyOnce(AckMode::Automatic) => {
+                self.set(LocalPublishState::AwaitComp(AckMode::Automatic));
+                (
+                    Response::Release(ReasonCode::Success),
+                    Event::Received(AckMode::Automatic),
+                )
+            }
+            LocalPublishState::DuePublishExactlyOnce(AckMode::Manual) => {
+                self.set(LocalPublishState::DueRel);
+                (Response::None, Event::Received(AckMode::Manual))
+            }
+
+            // Ideally, this state doesn't exist when a PUBREC is received because
+            // - the peer must not send a PUBREC packet "out of thin air" after a
+            //   reconnection and must not retransmit it during a connection
+            // and either of
+            // - on reconnection, all PUBREL packets should be resent immediately
+            // - in manual ack mode, the PUBREL packet should be sent immediately
+            //   after receiving the PUBREC
+            LocalPublishState::DueRel | LocalPublishState::DueReRel(_)
+                if reason_code.is_erroneous() =>
+            {
+                self.remove();
+                (Response::None, Event::Rejected)
+            }
+            LocalPublishState::DueReRel(AckMode::Automatic) => {
+                (Response::Release(ReasonCode::Success), Event::Ignored)
+            }
+            LocalPublishState::DueReRel(AckMode::Manual) | LocalPublishState::DueRel => {
+                // The user has not yet sent the manual PUBREL so we leave it up to them.
+                // We do not emit the `Received` event because the user has already seen
+                // that event and this PUBREC has not driven the state forward.
+                (Response::None, Event::Ignored)
+            }
+
+            LocalPublishState::AwaitComp(_) => {
+                // If the ack mode is manual, the user has already sent the PUBREL so we
+                // do it automatically now.
+                (Response::Release(ReasonCode::Success), Event::Ignored)
+            }
+
+            LocalPublishState::AwaitRec(_) if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::None, Event::Rejected)
+            }
+            LocalPublishState::AwaitRec(AckMode::Automatic) => {
+                self.set(LocalPublishState::AwaitComp(AckMode::Automatic));
+                (
+                    Response::Release(ReasonCode::Success),
+                    Event::Received(AckMode::Automatic),
+                )
+            }
+            LocalPublishState::AwaitRec(AckMode::Manual) => {
+                self.set(LocalPublishState::DueRel);
+                (Response::None, Event::Received(AckMode::Manual))
             }
         }
     }
@@ -381,7 +525,11 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
             LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
             | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedHandshakeState),
-            LocalPublishState::DueRel(mode) => {
+            LocalPublishState::DueRel => {
+                self.set(LocalPublishState::AwaitComp(AckMode::Manual));
+                Ok(())
+            }
+            LocalPublishState::DueReRel(mode) => {
                 self.set(LocalPublishState::AwaitComp(mode));
                 Ok(())
             }
@@ -390,22 +538,25 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
 
     pub(crate) fn inbound_pubcomp(self, reason_code: ReasonCode) -> (Response, Event) {
         match self.state {
+            // Mismatched QoS
             LocalPublishState::DuePublishAtLeastOnce | LocalPublishState::AwaitAck => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
             ),
+
+            // We have not sent any PUBREL yet at all, the peer skipped this handshake step.
             LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
-            | LocalPublishState::DueRel(_) => (
+            | LocalPublishState::DueRel => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
             ),
-            LocalPublishState::AwaitComp(_) => {
+
+            LocalPublishState::DueReRel(_) | LocalPublishState::AwaitComp(_) => {
                 self.remove();
                 if reason_code.is_success() {
                     (Response::None, Event::Completed)
                 } else {
-                    // TODO this mirrors the previous behaviour, but perhaps we should be trying to fix the state
                     (Response::None, Event::Rejected)
                 }
             }

@@ -146,10 +146,12 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     PublishComplete(Puback<'e, MAX_USER_PROPERTIES>),
 
     /// The server sent a SUBACK, UNSUBACK, PUBACK, PUBREC, PUBREL or PUBCOMP
-    /// packet with a packet identifier that is not in flight (anymore).
+    /// packet with a packet identifier that is not in flight (anymore) or the
+    /// server sent a PUBREC, PUBREL or PUBCOMP packet that did not drive the
+    /// the session entry of its packet identifier forward.
     ///
-    /// The client has not responded to the server or has responded appropriately
-    /// to prevent a potential protocol deadlock.
+    /// The client has not responded to the server or has responded according
+    /// to MQTT's rules to prevent a potential protocol deadlock.
     Ignored,
 
     /// The server sent a [`QoS::ExactlyOnce`] PUBLISH packet which would cause a duplicate.

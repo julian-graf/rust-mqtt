@@ -107,6 +107,8 @@ pub enum Error<'e, const MAX_USER_PROPERTIES: usize> {
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     AllPacketIdentifiersUsed,
 
+    ManualAckImpossible,
+
     /// The requested operation of a publication flow is not allowed for this packet identifier because
     /// it uses a different quality of service. This applies in the following cases:
     /// - A republish of a packet with a quality of service that does not match the quality of service
@@ -225,6 +227,7 @@ impl<const MAX_USER_PROPERTIES: usize> Error<'_, MAX_USER_PROPERTIES> {
             self,
             Self::PacketIdentifierNotInFlight
                 | Self::AllPacketIdentifiersUsed
+                | Self::ManualAckImpossible
                 | Self::QoSMismatched
                 | Self::HandshakeStateMismatched
                 | Self::IllegalReasonCode
@@ -264,6 +267,7 @@ impl<'e> Error<'e, 0> {
             Self::RecoveryRequired => Error::RecoveryRequired,
             Self::PacketIdentifierNotInFlight => Error::PacketIdentifierNotInFlight,
             Self::AllPacketIdentifiersUsed => Error::AllPacketIdentifiersUsed,
+            Self::ManualAckImpossible => Error::ManualAckImpossible,
             Self::QoSMismatched => Error::QoSMismatched,
             Self::HandshakeStateMismatched => Error::HandshakeStateMismatched,
             Self::IllegalReasonCode => Error::IllegalReasonCode,
