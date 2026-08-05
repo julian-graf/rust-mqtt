@@ -161,7 +161,6 @@ impl<
             shared_config: SharedConfig::default(),
             server_config: ServerConfig::default(),
             session: Session::default(),
-            // sm: todo!(),
             raw: Raw::new_disconnected(buffer),
 
             manual_ack_when: &|_| false,
@@ -793,11 +792,6 @@ impl<
                 info!("server receive maximum reached");
                 return Err(MqttError::SendQuotaExceeded);
             }
-            // TODO
-            // if !self.session.available_outbound_capacity() {
-            //     info!("client maximum concurrent publications reached");
-            //     return Err(MqttError::SessionBuffer);
-            // }
 
             let handle = match self.session.free_handle() {
                 Some(handle) => handle,
@@ -854,7 +848,7 @@ impl<
             // we have tracked the packet as in flight and can republish it.
             if let Err(e) = handle.outbound_publish(options.qos, options.ack_mode) {
                 match e {
-                    StateError::NoCapacity => return Err(MqttError::SessionBuffer), // TODO unreachable!("error should have been thrown before"),
+                    StateError::NoCapacity => return Err(MqttError::SessionBuffer),
                     StateError::PacketIdentifierUnused => unreachable!(),
                     StateError::QoSMismatched => {
                         unreachable!("the selected packet identifier is always unused")
