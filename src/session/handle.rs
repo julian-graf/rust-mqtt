@@ -167,7 +167,10 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic) => {
                     self.set(PeerPublishState::AwaitRel(AckMode::Automatic));
 
-                    (Response::Receive(ReasonCode::Success), Event::Duplicate(AckMode::Automatic))
+                    (
+                        Response::Receive(ReasonCode::Success),
+                        Event::Duplicate(AckMode::Automatic),
+                    )
                 }
                 PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual) => {
                     self.set(PeerPublishState::DueRec);
@@ -298,11 +301,8 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
 
             PeerPublishState::AwaitReRel => {
                 self.set(PeerPublishState::DueComp);
-                (
-                    Response::None,
-                    Event::Released(AckMode::Manual),
-                )
-            },
+                (Response::None, Event::Released(AckMode::Manual))
+            }
 
             PeerPublishState::DueComp if reason_code.is_erroneous() => {
                 self.remove();
@@ -384,8 +384,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 LocalPublishState::AwaitAck => Err(StateError::HandshakeStateMismatched),
                 LocalPublishState::DuePublishExactlyOnce(_)
                 | LocalPublishState::AwaitRec(_)
-                | LocalPublishState::DueRel
-                | LocalPublishState::DueReRel(_)
+                | LocalPublishState::DueRel(_)
                 | LocalPublishState::AwaitComp(_) => Err(StateError::QoSMismatched),
             },
             QoS::ExactlyOnce => match self.state {
@@ -393,8 +392,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                     Err(StateError::QoSMismatched)
                 }
                 LocalPublishState::AwaitRec(_)
-                | LocalPublishState::DueRel
-                | LocalPublishState::DueReRel(_)
+                | LocalPublishState::DueRel(_)
                 | LocalPublishState::AwaitComp(_) => Err(StateError::HandshakeStateMismatched),
                 LocalPublishState::DuePublishExactlyOnce(mode) => {
                     self.set(LocalPublishState::AwaitRec(mode));
@@ -426,8 +424,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
             // Mismatched QoS
             LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
-            | LocalPublishState::DueRel
-            | LocalPublishState::DueReRel(_)
+            | LocalPublishState::DueRel(_)
             | LocalPublishState::AwaitComp(_) => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
@@ -471,7 +468,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 )
             }
             LocalPublishState::DuePublishExactlyOnce(AckMode::Manual) => {
-                self.set(LocalPublishState::DueRel);
+                self.set(LocalPublishState::DueRel(AckMode::Manual));
                 (Response::None, Event::Received(AckMode::Manual))
             }
 
@@ -482,16 +479,14 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
             // - on reconnection, all PUBREL packets should be resent immediately
             // - in manual ack mode, the PUBREL packet should be sent immediately
             //   after receiving the PUBREC
-            LocalPublishState::DueRel | LocalPublishState::DueReRel(_)
-                if reason_code.is_erroneous() =>
-            {
+            LocalPublishState::DueRel(_) if reason_code.is_erroneous() => {
                 self.remove();
                 (Response::None, Event::Rejected)
             }
-            LocalPublishState::DueReRel(AckMode::Automatic) => {
+            LocalPublishState::DueRel(AckMode::Automatic) => {
                 (Response::Release(ReasonCode::Success), Event::Ignored)
             }
-            LocalPublishState::DueReRel(AckMode::Manual) | LocalPublishState::DueRel => {
+            LocalPublishState::DueRel(AckMode::Manual) => {
                 // The user has not yet sent the manual PUBREL so we leave it up to them.
                 // We do not emit the `Received` event because the user has already seen
                 // that event and this PUBREC has not driven the state forward.
@@ -516,7 +511,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 )
             }
             LocalPublishState::AwaitRec(AckMode::Manual) => {
-                self.set(LocalPublishState::DueRel);
+                self.set(LocalPublishState::DueRel(AckMode::Manual));
                 (Response::None, Event::Received(AckMode::Manual))
             }
         }
@@ -530,11 +525,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
             LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
             | LocalPublishState::AwaitComp(_) => Err(StateError::HandshakeStateMismatched),
-            LocalPublishState::DueRel => {
-                self.set(LocalPublishState::AwaitComp(AckMode::Manual));
-                Ok(())
-            }
-            LocalPublishState::DueReRel(mode) => {
+            LocalPublishState::DueRel(mode) => {
                 self.set(LocalPublishState::AwaitComp(mode));
                 Ok(())
             }
@@ -549,15 +540,18 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 Event::ServerError,
             ),
 
-            // We have not sent any PUBREL yet at all, the peer skipped this handshake step.
-            LocalPublishState::DuePublishExactlyOnce(_)
-            | LocalPublishState::AwaitRec(_)
-            | LocalPublishState::DueRel => (
+            // We must treat the PUBLISH packet as unacknowledged until we have received a PUBREC:
+            // | MUST treat the PUBLISH packet as “unacknowledged” until it has received the corresponding PUBREC packet from the receiver [MQTT-4.3.3-3].
+            //
+            // We have not yet received a PUBREC packet, if we had, we would be in due PUBREL
+            // or await PUBCOMP state. Therefore this PUBCOMP can't complete this handshake
+            // right now.
+            LocalPublishState::DuePublishExactlyOnce(_) | LocalPublishState::AwaitRec(_) => (
                 Response::Disconnect(ReasonCode::ProtocolError),
                 Event::ServerError,
             ),
 
-            LocalPublishState::DueReRel(_) | LocalPublishState::AwaitComp(_) => {
+            LocalPublishState::DueRel(_) | LocalPublishState::AwaitComp(_) => {
                 self.remove();
                 if reason_code.is_success() {
                     (Response::None, Event::Completed)

@@ -52,11 +52,11 @@ pub enum LocalPublishState {
     AwaitRec(AckMode),
     /// A PUBREC packet has been received. The next step in the handshake is the client
     /// sending a PUBREL packet. This packet must be sent manually by the user.
-    DueRel,
+    // DueRel,
     /// A reconnection has occured with a PUBREL packet having been sent before. The next step
     /// in the handshake is the client resending a PUBREL packet. Whether this packet must be
     /// sent manually by the user is determined by the contained [`AckMode`].
-    DueReRel(AckMode),
+    DueRel(AckMode),
     /// A PUBREL packet has been sent. The final and next step in the handshake is the server
     /// sending a PUBCOMP packet.
     AwaitComp(AckMode),
@@ -70,9 +70,8 @@ impl LocalPublishState {
 
             Self::DuePublishExactlyOnce(mode) => Self::DuePublishExactlyOnce(mode),
             Self::AwaitRec(mode) => Self::DuePublishExactlyOnce(mode),
-            Self::DueRel => Self::DueRel,
-            Self::DueReRel(mode) => Self::DueReRel(mode),
-            Self::AwaitComp(mode) => Self::DueReRel(mode),
+            Self::DueRel(mode) => Self::DueRel(mode),
+            Self::AwaitComp(mode) => Self::DueRel(mode),
         }
     }
 }
@@ -3008,9 +3007,6 @@ mod unit {
         // Invalid server actions should lead to disconnect
         for pid in pids.iter().copied() {
             let (r, e) = sm.inbound_puback(pid, ReasonCode::Success);
-            assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
-            assert_eq!(e, Event::ServerError);
-            let (r, e) = sm.inbound_pubcomp(pid, ReasonCode::Success);
             assert_eq!(r, Response::Disconnect(ReasonCode::ProtocolError));
             assert_eq!(e, Event::ServerError);
         }

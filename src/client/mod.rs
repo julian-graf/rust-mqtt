@@ -1053,7 +1053,7 @@ impl<
         };
 
         loop {
-            if handle.state == LocalPublishState::DueReRel(AckMode::Automatic) {
+            if handle.state == LocalPublishState::DueRel(AckMode::Automatic) {
                 handle.outbound_pubrel().unwrap();
 
                 let pubrel =
