@@ -116,6 +116,10 @@ pub enum PeerPublishState {
     /// PUBREL packet. Whether the subsequent PUBCOMP packet must be sent manually by the client
     /// is determined by the contained [`AckMode`].
     AwaitRel(AckMode),
+    /// A PUBREL packet has been received before a reconnection occurred. The next step in the
+    /// handshake is the server sending a PUBREL packet. The subsequent PUBCOMP packet
+    /// must be sent manually by the client.
+    AwaitReRel,
     /// A PUBREL packet has been received. The final and next step in the handshake is the
     /// client sending a PUBCOMP packet. This packet must be sent manually by the user.
     DueComp,
@@ -130,7 +134,8 @@ impl PeerPublishState {
             Self::AwaitPublishExactlyOnce(mode) => Self::AwaitPublishExactlyOnce(mode),
             Self::DueRec => Self::AwaitPublishExactlyOnce(AckMode::Manual),
             Self::AwaitRel(mode) => Self::AwaitPublishExactlyOnce(mode),
-            Self::DueComp => Self::AwaitRel(AckMode::Manual),
+            Self::AwaitReRel => Self::AwaitReRel,
+            Self::DueComp => Self::AwaitReRel,
         }
     }
 }
@@ -150,9 +155,9 @@ pub(crate) enum Response {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum StateError {
     NoCapacity,
-    UnusedPacketIdentifier,
-    MismatchedQoS,
-    MismatchedHandshakeState,
+    PacketIdentifierUnused,
+    QoSMismatched,
+    HandshakeStateMismatched,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,7 +427,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
     ) -> Result<(), StateError> {
         self.inbound_handle(packet_identifier)
             .map(|h| h.outbound_puback())
-            .unwrap_or(Err(StateError::UnusedPacketIdentifier))
+            .unwrap_or(Err(StateError::PacketIdentifierUnused))
     }
 
     pub(crate) fn outbound_pubrec(
@@ -432,7 +437,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
     ) -> Result<(), StateError> {
         self.inbound_handle(packet_identifier)
             .map(|h| h.outbound_pubrec(reason_code))
-            .unwrap_or(Err(StateError::UnusedPacketIdentifier))
+            .unwrap_or(Err(StateError::PacketIdentifierUnused))
     }
 
     pub(crate) fn inbound_pubrel(
@@ -456,7 +461,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
     ) -> Result<(), StateError> {
         self.inbound_handle(packet_identifier)
             .map(|h| h.outbound_pubcomp())
-            .unwrap_or(Err(StateError::UnusedPacketIdentifier))
+            .unwrap_or(Err(StateError::PacketIdentifierUnused))
     }
 }
 
@@ -472,7 +477,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
             IdentifiedQoS::AtLeastOnce(pid) | IdentifiedQoS::ExactlyOnce(pid) => self
                 .outbound_handle(pid)
                 .map(|mut h| h.outbound_republish(identified_qos.into()))
-                .unwrap_or(Err(StateError::UnusedPacketIdentifier)),
+                .unwrap_or(Err(StateError::PacketIdentifierUnused)),
         }
     }
 
@@ -505,7 +510,7 @@ impl<const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEND_MA
     ) -> Result<(), StateError> {
         self.outbound_handle(packet_identifier)
             .map(|mut h| h.outbound_pubrel())
-            .unwrap_or(Err(StateError::UnusedPacketIdentifier))
+            .unwrap_or(Err(StateError::PacketIdentifierUnused))
     }
 
     pub(crate) fn inbound_pubcomp(
@@ -652,10 +657,10 @@ mod unit {
                     must_not_resend_same_connection,
                     [
                         out_pub(AtLeastOnce, Automatic) => ok(),
-                        out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+                        out_repub(AtLeastOnce) => err(HandshakeStateMismatched),
                         reconnect(),
                         out_repub(AtLeastOnce) => ok(),
-                        out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+                        out_repub(AtLeastOnce) => err(HandshakeStateMismatched),
                     ]
                 );
                 sm_test!(
@@ -664,18 +669,18 @@ mod unit {
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(Success) => res(None, Acknowledged),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
 
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(Success) => res(None, Acknowledged),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
 
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(Success) => res(None, Acknowledged),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
                     ]
                 );
                 sm_test!(
@@ -684,18 +689,18 @@ mod unit {
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(UnspecifiedError) => res(None, Rejected),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
 
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(UnspecifiedError) => res(None, Rejected),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
 
                         out_pub(AtLeastOnce, Automatic) => ok(),
                         in_ack(UnspecifiedError) => res(None, Rejected),
                         reconnect(),
-                        out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+                        out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
                     ]
                 );
             }
@@ -712,9 +717,9 @@ mod unit {
                         must_not_resend_puback,
                         [
                             in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-                            out_ack() => err(UnusedPacketIdentifier),
+                            out_ack() => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_ack() => err(UnusedPacketIdentifier),
+                            out_ack() => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -770,9 +775,9 @@ mod unit {
                         [
                             in_pub(AtLeastOnce, Manual) => res(None, Publish),
                             out_ack() => ok(),
-                            out_ack() => err(UnusedPacketIdentifier),
+                            out_ack() => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_ack() => err(UnusedPacketIdentifier),
+                            out_ack() => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -832,10 +837,10 @@ mod unit {
                         must_not_resend_publish_same_connection,
                         [
                             out_pub(ExactlyOnce, Automatic) => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
                             out_repub(ExactlyOnce) => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -844,7 +849,7 @@ mod unit {
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -852,9 +857,9 @@ mod unit {
                         [
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -863,18 +868,18 @@ mod unit {
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -943,10 +948,10 @@ mod unit {
                         [
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
-                            out_rel() => err(MismatchedHandshakeState),
+                            out_rel() => err(HandshakeStateMismatched),
                             reconnect(),
                             out_rel() => ok(),
-                            out_rel() => err(MismatchedHandshakeState),
+                            out_rel() => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -956,14 +961,14 @@ mod unit {
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
                             in_comp(Success) => res(None, Completed),
                             reconnect(),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
                             in_comp(Success) => res(None, Completed),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -972,7 +977,7 @@ mod unit {
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -980,9 +985,9 @@ mod unit {
                         [
                             out_pub(ExactlyOnce, Automatic) => ok(),
                             in_rec(Success) => res(Release(Success), Received(Automatic)),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                 }
@@ -1003,10 +1008,10 @@ mod unit {
                         must_not_resend_publish_same_connection,
                         [
                             out_pub(ExactlyOnce, Manual) => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
                             out_repub(ExactlyOnce) => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
 
@@ -1016,7 +1021,7 @@ mod unit {
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(Success) => res(None, Received(Manual)),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1024,9 +1029,9 @@ mod unit {
                         [
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(Success) => res(None, Received(Manual)),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1035,18 +1040,18 @@ mod unit {
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+                            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -1066,7 +1071,7 @@ mod unit {
                         [
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(UnspecifiedError) => res(None, Rejected),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -1116,10 +1121,10 @@ mod unit {
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(Success) => res(None, Received(Manual)),
                             out_rel() => ok(),
-                            out_rel() => err(MismatchedHandshakeState),
+                            out_rel() => err(HandshakeStateMismatched),
                             reconnect(),
                             out_rel() => ok(),
-                            out_rel() => err(MismatchedHandshakeState),
+                            out_rel() => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1130,15 +1135,15 @@ mod unit {
                             out_rel() => ok(),
                             in_comp(Success) => res(None, Completed),
                             reconnect(),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
 
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(Success) => res(None, Received(Manual)),
                             out_rel() => ok(),
                             in_comp(Success) => res(None, Completed),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
                             reconnect(),
-                            out_rel() => err(UnusedPacketIdentifier),
+                            out_rel() => err(PacketIdentifierUnused),
                         ]
                     );
                     sm_test!(
@@ -1148,7 +1153,7 @@ mod unit {
                             in_rec(Success) => res(None, Received(Manual)),
                             out_rel() => ok(),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1157,9 +1162,9 @@ mod unit {
                             out_pub(ExactlyOnce, Manual) => ok(),
                             in_rec(Success) => res(None, Received(Manual)),
                             out_rel() => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1169,7 +1174,7 @@ mod unit {
                             in_rec(Success) => res(None, Received(Manual)),
                             reconnect(),
                             out_rel() => ok(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1180,7 +1185,7 @@ mod unit {
                             reconnect(),
                             out_rel() => ok(),
                             reconnect(),
-                            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+                            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
                         ]
                     );
                 }
@@ -1198,9 +1203,9 @@ mod unit {
                         must_not_resend_pubrec,
                         [
                             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-                            out_rec(Success) => err(MismatchedHandshakeState),
+                            out_rec(Success) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_rec(Success) => err(MismatchedHandshakeState),
+                            out_rec(Success) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1491,9 +1496,9 @@ mod unit {
                         [
                             in_pub(ExactlyOnce, Manual) => res(None, Publish),
                             out_rec(Success) => ok(),
-                            out_rec(Success) => err(MismatchedHandshakeState),
+                            out_rec(Success) => err(HandshakeStateMismatched),
                             reconnect(),
-                            out_rec(Success) => err(MismatchedHandshakeState),
+                            out_rec(Success) => err(HandshakeStateMismatched),
                         ]
                     );
                     sm_test!(
@@ -1814,14 +1819,12 @@ mod unit {
                             in_pub(ExactlyOnce, Manual) => res(None, Publish),
                             out_rec(Success) => ok(),
                             reconnect(),
-                            in_rel(PacketIdentifierNotFound) => res(None, Aborted),
-                            out_comp() => ok(),
+                            in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
 
                             in_pub(ExactlyOnce, Manual) => res(None, Publish),
                             out_rec(Success) => ok(),
                             reconnect(),
-                            in_rel(PacketIdentifierNotFound) => res(None, Aborted),
-                            out_comp() => ok(),
+                            in_rel(PacketIdentifierNotFound) => res(Complete(Success), Aborted),
                         ]
                     );
                     sm_test!(
@@ -2090,11 +2093,11 @@ mod unit {
     sm_test!(
         no_acks_out_of_thin_air,
         [
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
 
@@ -2102,16 +2105,16 @@ mod unit {
         sender_automatic_no_qos1_publish_retransmit,
         [
             out_pub(AtLeastOnce, Automatic) => ok(),
-            out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+            out_repub(AtLeastOnce) => err(HandshakeStateMismatched),
             reconnect(),
             out_repub(AtLeastOnce) => ok(),
-            out_repub(AtLeastOnce) => err(MismatchedHandshakeState),
+            out_repub(AtLeastOnce) => err(HandshakeStateMismatched),
             in_ack(Success) => res(None, Acknowledged),
-            out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+            out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
 
             out_pub(AtLeastOnce, Automatic) => ok(),
             in_ack(UnspecifiedError) => res(None, Rejected),
-            out_repub(AtLeastOnce) => err(UnusedPacketIdentifier),
+            out_repub(AtLeastOnce) => err(PacketIdentifierUnused),
         ]
     );
 
@@ -2119,55 +2122,55 @@ mod unit {
         sender_automatic_no_qos2_publish_retransmit,
         [
             out_pub(ExactlyOnce, Automatic) => ok(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             reconnect(),
             out_repub(ExactlyOnce) => ok(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             in_rec(Success) => res(Release(Success), Received(Automatic)),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             reconnect(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             in_comp(Success) => res(None, Completed),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
             out_pub(ExactlyOnce, Automatic) => ok(),
             in_rec(UnspecifiedError) => res(None, Rejected),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
             out_pub(ExactlyOnce, Automatic) => ok(),
             in_rec(Success) => res(Release(Success), Received(Automatic)),
             reconnect(),
             in_comp(Success) => res(None, Completed),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         sender_manual_no_qos2_publish_retransmit,
         [
             out_pub(ExactlyOnce, Manual) => ok(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             reconnect(),
             out_repub(ExactlyOnce) => ok(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             in_rec(Success) => res(None, Received(Manual)),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             reconnect(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             out_rel() => ok(),
-            out_repub(ExactlyOnce) => err(MismatchedHandshakeState),
+            out_repub(ExactlyOnce) => err(HandshakeStateMismatched),
             in_comp(Success) => res(None, Completed),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
             out_pub(ExactlyOnce, Manual) => ok(),
             in_rec(UnspecifiedError) => res(None, Rejected),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
 
             out_pub(ExactlyOnce, Manual) => ok(),
             in_rec(Success) => res(None, Received(Manual)),
             out_rel() => ok(),
             reconnect(),
             in_comp(Success) => res(None, Completed),
-            out_repub(ExactlyOnce) => err(UnusedPacketIdentifier),
+            out_repub(ExactlyOnce) => err(PacketIdentifierUnused),
         ]
     );
 
@@ -2176,10 +2179,10 @@ mod unit {
         [
             out_pub(ExactlyOnce, Automatic) => ok(),
             in_rec(Success) => res(Release(Success), Received(Automatic)),
-            out_rel() => err(MismatchedHandshakeState),
+            out_rel() => err(HandshakeStateMismatched),
             reconnect(),
             out_rel() => ok(),
-            out_rel() => err(MismatchedHandshakeState),
+            out_rel() => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2188,10 +2191,10 @@ mod unit {
             out_pub(ExactlyOnce, Manual) => ok(),
             in_rec(Success) => res(None, Received(Manual)),
             out_rel() => ok(),
-            out_rel() => err(MismatchedHandshakeState),
+            out_rel() => err(HandshakeStateMismatched),
             reconnect(),
             out_rel() => ok(),
-            out_rel() => err(MismatchedHandshakeState),
+            out_rel() => err(HandshakeStateMismatched),
         ]
     );
 
@@ -2199,11 +2202,11 @@ mod unit {
         receiver_automatic_no_puback_retransmit,
         [
             in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
-            out_ack() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
 
             in_pub(AtLeastOnce, Automatic) => res(Acknowledge(Success), Publish),
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
@@ -2211,12 +2214,12 @@ mod unit {
         [
             in_pub(AtLeastOnce, Manual) => res(None, Publish),
             out_ack() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
 
             in_pub(AtLeastOnce, Manual) => res(None, Publish),
             out_ack() => ok(),
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
         ]
     );
 
@@ -2224,8 +2227,8 @@ mod unit {
         receiver_automatic_no_pubrec_retransmit_1,
         [
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2233,8 +2236,8 @@ mod unit {
         [
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
             reconnect(),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2242,12 +2245,12 @@ mod unit {
         [
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(UnspecifiedError) => ok(),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
 
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(UnspecifiedError) => ok(),
             reconnect(),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
@@ -2255,7 +2258,7 @@ mod unit {
         [
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(Success) => ok(),
-            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(Success) => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2264,7 +2267,7 @@ mod unit {
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(Success) => ok(),
             reconnect(),
-            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(Success) => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2272,7 +2275,7 @@ mod unit {
         [
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             reconnect(),
-            out_rec(Success) => err(MismatchedHandshakeState),
+            out_rec(Success) => err(HandshakeStateMismatched),
         ]
     );
     sm_test!(
@@ -2280,7 +2283,7 @@ mod unit {
         [
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             reconnect(),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
         ]
     );
 
@@ -2289,12 +2292,12 @@ mod unit {
         [
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
             in_rel(Success) => res(Complete(Success), Released(Automatic)),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
             in_rel(Success) => res(Complete(Success), Released(Automatic)),
             reconnect(),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
@@ -2304,20 +2307,20 @@ mod unit {
             out_rec(Success) => ok(),
             in_rel(Success) => res(None, Released(Manual)),
             out_comp() => ok(),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(Success) => ok(),
             in_rel(Success) => res(None, Released(Manual)),
             out_comp() => ok(),
             reconnect(),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
             out_rec(Success) => ok(),
             in_rel(Success) => res(None, Released(Manual)),
             reconnect(),
-            out_comp() => err(MismatchedHandshakeState),
+            out_comp() => err(HandshakeStateMismatched),
         ]
     );
 
@@ -2325,259 +2328,259 @@ mod unit {
         sender_no_incorrect_acknowledgement_qos1,
         [
             out_pub(AtLeastOnce, Automatic) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedQoS),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(QoSMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedQoS),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(QoSMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_repub(AtLeastOnce) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedQoS),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(QoSMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_ack(Success) => res(None, Acknowledged),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         sender_automatic_no_incorrect_acknowledgement_qos2,
         [
             out_pub(ExactlyOnce, Automatic) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_repub(ExactlyOnce) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_rec(Success) => res(Release(Success), Received(Automatic)),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_rel() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_comp(Success) => res(None, Completed),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         sender_manual_no_incorrect_acknowledgement_qos2,
         [
             out_pub(ExactlyOnce, Manual) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_repub(ExactlyOnce) => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_rec(Success) => res(None, Received(Manual)),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_rel() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
 
             out_rel() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(MismatchedHandshakeState),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(HandshakeStateMismatched),
+            out_comp() => err(PacketIdentifierUnused),
 
             in_comp(Success) => res(None, Completed),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         receiver_manual_no_incorrect_acknowledgement_qos1,
         [
             in_pub(AtLeastOnce, Manual) => res(None, Publish),
-            out_rec(Success) => err(MismatchedQoS),
-            out_rec(UnspecifiedError) => err(MismatchedQoS),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedQoS),
+            out_rec(Success) => err(QoSMismatched),
+            out_rec(UnspecifiedError) => err(QoSMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(QoSMismatched),
 
             reconnect(),
-            out_ack() => err(MismatchedHandshakeState),
-            out_rec(Success) => err(MismatchedQoS),
-            out_rec(UnspecifiedError) => err(MismatchedQoS),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedQoS),
+            out_ack() => err(HandshakeStateMismatched),
+            out_rec(Success) => err(QoSMismatched),
+            out_rec(UnspecifiedError) => err(QoSMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(QoSMismatched),
 
             in_pub(AtLeastOnce, Manual) => res(None, Publish),
             out_ack() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         receiver_automatic_no_incorrect_acknowledgement_qos2,
         [
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Publish),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             reconnect(),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             in_pub(ExactlyOnce, Automatic) => res(Receive(Success), Duplicate(Automatic)),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             in_rel(Success) => res(Complete(Success), Released(Automatic)),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
     sm_test!(
         receiver_manual_no_incorrect_acknowledgement_qos2,
         [
             in_pub(ExactlyOnce, Manual) => res(None, Publish),
-            out_ack() => err(MismatchedQoS),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             reconnect(),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             in_pub(ExactlyOnce, Manual) => res(None, Duplicate(Manual)),
-            out_ack() => err(MismatchedQoS),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             out_rec(Success) => ok(),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             in_rel(Success) => res(None, Released(Manual)),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
 
             reconnect(),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(MismatchedHandshakeState),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(HandshakeStateMismatched),
 
             in_rel(Success) => res(None, Released(Manual)),
-            out_ack() => err(MismatchedQoS),
-            out_rec(Success) => err(MismatchedHandshakeState),
-            out_rec(UnspecifiedError) => err(MismatchedHandshakeState),
-            out_rel() => err(UnusedPacketIdentifier),
+            out_ack() => err(QoSMismatched),
+            out_rec(Success) => err(HandshakeStateMismatched),
+            out_rec(UnspecifiedError) => err(HandshakeStateMismatched),
+            out_rel() => err(PacketIdentifierUnused),
 
             out_comp() => ok(),
-            out_ack() => err(UnusedPacketIdentifier),
-            out_rec(Success) => err(UnusedPacketIdentifier),
-            out_rec(UnspecifiedError) => err(UnusedPacketIdentifier),
-            out_rel() => err(UnusedPacketIdentifier),
-            out_comp() => err(UnusedPacketIdentifier),
+            out_ack() => err(PacketIdentifierUnused),
+            out_rec(Success) => err(PacketIdentifierUnused),
+            out_rec(UnspecifiedError) => err(PacketIdentifierUnused),
+            out_rel() => err(PacketIdentifierUnused),
+            out_comp() => err(PacketIdentifierUnused),
         ]
     );
 
@@ -2610,9 +2613,9 @@ mod unit {
         // Invalid client actions should not be allowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
         }
         // Invalid server actions should not be allowed
         for pid in pids.iter().copied() {
@@ -2639,11 +2642,11 @@ mod unit {
         assert!(sm.inbound_publishes.is_empty());
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
 
             let (r, e) = sm.inbound_pubrel(pid, ReasonCode::Success);
             assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
@@ -2697,11 +2700,11 @@ mod unit {
         // Invalid client actions shouldn't be allowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Complete the QoS 2 publication
@@ -2715,11 +2718,11 @@ mod unit {
         assert!(sm.inbound_publishes.is_empty());
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
 
             let (r, e) = sm.inbound_pubrel(pid, ReasonCode::Success);
             assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
@@ -2771,9 +2774,9 @@ mod unit {
         // Invalid client actions should not be allowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Proceed to the next handshake state
@@ -2785,11 +2788,11 @@ mod unit {
         // Now sending a PUBREC shouldn't be allowed either
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         for pid in pids.iter().copied() {
@@ -2801,9 +2804,9 @@ mod unit {
         // Invalid client actions should not be allowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::MismatchedQoS));
+            assert_eq!(r, Err(StateError::QoSMismatched));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Complete the publication
@@ -2816,11 +2819,11 @@ mod unit {
         assert!(sm.inbound_publishes.is_empty());
         for pid in pids.iter().copied() {
             let r = sm.outbound_puback(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubrec(pid, ReasonCode::Success);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
             let r = sm.outbound_pubcomp(pid);
-            assert_eq!(r, Err(StateError::UnusedPacketIdentifier));
+            assert_eq!(r, Err(StateError::PacketIdentifierUnused));
 
             let (r, e) = sm.inbound_pubrel(pid, ReasonCode::Success);
             assert_eq!(r, Response::Complete(ReasonCode::PacketIdentifierNotFound));
@@ -2944,7 +2947,7 @@ mod unit {
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(pid));
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Complete the publication
@@ -3015,7 +3018,7 @@ mod unit {
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(pid));
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Move to next stage
@@ -3034,7 +3037,7 @@ mod unit {
         // Republishing at this stage should be disallowed
         for pid in pids.iter().copied() {
             let r = sm.outbound_republish(IdentifiedQoS::ExactlyOnce(pid));
-            assert_eq!(r, Err(StateError::MismatchedHandshakeState));
+            assert_eq!(r, Err(StateError::HandshakeStateMismatched));
         }
 
         // Complete the publication

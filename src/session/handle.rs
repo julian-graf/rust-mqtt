@@ -126,6 +126,7 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 PeerPublishState::AwaitPublishExactlyOnce(_)
                 | PeerPublishState::DueRec
                 | PeerPublishState::AwaitRel(_)
+                | PeerPublishState::AwaitReRel
                 | PeerPublishState::DueComp => {
                     self.remove();
                     (
@@ -158,6 +159,22 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                     )
                 }
 
+                // This state is reached after a reconnection with both possibilities of
+                // - the peer resending a PUBLISH
+                // - the peer (re-)sending a PUBREL
+                //
+                // We (the user) has not yet sent a PUBREC in this connection so it is their responsibility.
+                PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic) => {
+                    self.set(PeerPublishState::AwaitRel(AckMode::Automatic));
+
+                    (Response::Receive(ReasonCode::Success), Event::Duplicate(AckMode::Automatic))
+                }
+                PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual) => {
+                    self.set(PeerPublishState::DueRec);
+
+                    (Response::None, Event::Duplicate(AckMode::Manual))
+                }
+
                 // The user has not yet sent the manual PUBREC so we leave it up to them.
                 // The PUBLISH has not driven the state forward, so an ignored event would
                 // be fitting, but duplicate matches better here.
@@ -174,27 +191,10 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 // packet. We have not yet sent a PUBCOMP packet so this PUBLISH also can't be
                 // a new application message that reuses the same packet identifier. This is a
                 // clear protocol error.
-                PeerPublishState::DueComp => (
+                PeerPublishState::AwaitReRel | PeerPublishState::DueComp => (
                     Response::Disconnect(ReasonCode::ProtocolError),
                     Event::ServerError,
                 ),
-
-                // If the user has already sent a PUBREC packet, the state would be awaiting
-                // the PUBREL packet. Therefore we can safely delegate the responsibility for
-                // the PUBREC to the user instead of sending it automatically.
-                PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual) => {
-                    self.set(PeerPublishState::DueRec);
-
-                    (Response::None, Event::Duplicate(AckMode::Manual))
-                }
-                PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic) => {
-                    self.set(PeerPublishState::AwaitRel(AckMode::Automatic));
-
-                    (
-                        Response::Receive(ReasonCode::Success),
-                        Event::Duplicate(AckMode::Automatic),
-                    )
-                }
             },
         }
     }
@@ -204,11 +204,12 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
     /// state in either case.
     pub(crate) fn outbound_puback(self) -> Result<(), StateError> {
         match self.state {
-            PeerPublishState::AwaitPublishAtLeastOnce => Err(StateError::MismatchedHandshakeState),
+            PeerPublishState::AwaitPublishAtLeastOnce => Err(StateError::HandshakeStateMismatched),
             PeerPublishState::AwaitPublishExactlyOnce(_)
             | PeerPublishState::DueRec
             | PeerPublishState::AwaitRel(_)
-            | PeerPublishState::DueComp => Err(StateError::MismatchedQoS),
+            | PeerPublishState::AwaitReRel
+            | PeerPublishState::DueComp => Err(StateError::QoSMismatched),
             PeerPublishState::DueAck => {
                 self.remove();
                 Ok(())
@@ -219,17 +220,18 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
     pub(crate) fn outbound_pubrec(mut self, reason_code: ReasonCode) -> Result<(), StateError> {
         match self.state {
             PeerPublishState::AwaitPublishAtLeastOnce | PeerPublishState::DueAck => {
-                Err(StateError::MismatchedQoS)
+                Err(StateError::QoSMismatched)
             }
             PeerPublishState::AwaitPublishExactlyOnce(_)
             | PeerPublishState::AwaitRel(_)
-            | PeerPublishState::DueComp => Err(StateError::MismatchedHandshakeState),
-            PeerPublishState::DueRec if reason_code.is_success() => {
-                self.set(PeerPublishState::AwaitRel(AckMode::Manual));
+            | PeerPublishState::AwaitReRel
+            | PeerPublishState::DueComp => Err(StateError::HandshakeStateMismatched),
+            PeerPublishState::DueRec if reason_code.is_erroneous() => {
+                self.remove();
                 Ok(())
             }
             PeerPublishState::DueRec => {
-                self.remove();
+                self.set(PeerPublishState::AwaitRel(AckMode::Manual));
                 Ok(())
             }
         }
@@ -245,11 +247,21 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 Event::ServerError,
             ),
 
-            // // The user has not yet sent the manual PUBREL so we leave it up to them.
-            // // We do not emit the `Received` event because the user has already seen
-            // // that event and this PUBREC has not driven the state forward.
-            //
-            // PeerPublishState::DueRec => (Response::Disconnect(ReasonCode::ProtocolError), Event::ServerError),
+            PeerPublishState::AwaitPublishExactlyOnce(_) if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::Complete(ReasonCode::Success), Event::Aborted)
+            }
+            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic) => {
+                self.remove();
+                (
+                    Response::Complete(ReasonCode::Success),
+                    Event::Released(AckMode::Automatic),
+                )
+            }
+            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual) => {
+                self.set(PeerPublishState::DueComp);
+                (Response::None, Event::Released(AckMode::Manual))
+            }
 
             // This state means we have never sent a PUBREC and therefore the peer should
             // not have sent a PUBREL. We have two options:
@@ -268,43 +280,35 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                 (Response::None, Event::Released(AckMode::Manual))
             }
 
-
-            PeerPublishState::DueComp if reason_code.is_erroneous() => {
+            PeerPublishState::AwaitRel(_) if reason_code.is_erroneous() => {
                 self.remove();
                 (Response::Complete(ReasonCode::Success), Event::Aborted)
             }
-            PeerPublishState::DueComp => (Response::None, Event::Aborted),
-
-            PeerPublishState::AwaitPublishExactlyOnce(mode) | PeerPublishState::AwaitRel(mode)
-                if reason_code.is_erroneous() =>
-            {
-                // The reason code in this case can only be PacketIdentifierNotFound
-
-                // The server hasn't found the PID of a PUBREC packet of ours.
-                // This means it doesn't track its original PUBLISH anymore.
-                // We still have to respond with a PUBCOMP.
-                if mode.is_manual() {
-                    self.set(PeerPublishState::DueComp);
-                    (Response::None, Event::Aborted)
-                } else {
-                    self.remove();
-                    (Response::Complete(ReasonCode::Success), Event::Aborted)
-                }
-            }
-
-            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Automatic)
-            | PeerPublishState::AwaitRel(AckMode::Automatic) => {
+            PeerPublishState::AwaitRel(AckMode::Automatic) => {
                 self.remove();
                 (
                     Response::Complete(ReasonCode::Success),
                     Event::Released(AckMode::Automatic),
                 )
             }
-            PeerPublishState::AwaitPublishExactlyOnce(AckMode::Manual)
-            | PeerPublishState::AwaitRel(AckMode::Manual) => {
+            PeerPublishState::AwaitRel(AckMode::Manual) => {
                 self.set(PeerPublishState::DueComp);
                 (Response::None, Event::Released(AckMode::Manual))
             }
+
+            PeerPublishState::AwaitReRel => {
+                self.set(PeerPublishState::DueComp);
+                (
+                    Response::None,
+                    Event::Released(AckMode::Manual),
+                )
+            },
+
+            PeerPublishState::DueComp if reason_code.is_erroneous() => {
+                self.remove();
+                (Response::Complete(ReasonCode::Success), Event::Aborted)
+            }
+            PeerPublishState::DueComp => (Response::None, Event::Ignored),
         }
     }
 
@@ -312,11 +316,12 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
     pub(crate) fn outbound_pubcomp(self) -> Result<(), StateError> {
         match self.state {
             PeerPublishState::AwaitPublishAtLeastOnce | PeerPublishState::DueAck => {
-                Err(StateError::MismatchedQoS)
+                Err(StateError::QoSMismatched)
             }
             PeerPublishState::AwaitPublishExactlyOnce(_)
             | PeerPublishState::DueRec
-            | PeerPublishState::AwaitRel(_) => Err(StateError::MismatchedHandshakeState),
+            | PeerPublishState::AwaitRel(_)
+            | PeerPublishState::AwaitReRel => Err(StateError::HandshakeStateMismatched),
             PeerPublishState::DueComp => {
                 self.remove();
                 Ok(())
@@ -376,21 +381,21 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
                     self.set(LocalPublishState::AwaitAck);
                     Ok(())
                 }
-                LocalPublishState::AwaitAck => Err(StateError::MismatchedHandshakeState),
+                LocalPublishState::AwaitAck => Err(StateError::HandshakeStateMismatched),
                 LocalPublishState::DuePublishExactlyOnce(_)
                 | LocalPublishState::AwaitRec(_)
                 | LocalPublishState::DueRel
                 | LocalPublishState::DueReRel(_)
-                | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedQoS),
+                | LocalPublishState::AwaitComp(_) => Err(StateError::QoSMismatched),
             },
             QoS::ExactlyOnce => match self.state {
                 LocalPublishState::DuePublishAtLeastOnce | LocalPublishState::AwaitAck => {
-                    Err(StateError::MismatchedQoS)
+                    Err(StateError::QoSMismatched)
                 }
                 LocalPublishState::AwaitRec(_)
                 | LocalPublishState::DueRel
                 | LocalPublishState::DueReRel(_)
-                | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedHandshakeState),
+                | LocalPublishState::AwaitComp(_) => Err(StateError::HandshakeStateMismatched),
                 LocalPublishState::DuePublishExactlyOnce(mode) => {
                     self.set(LocalPublishState::AwaitRec(mode));
                     Ok(())
@@ -520,11 +525,11 @@ impl<'a, const SUBSCRIBE_MAXIMUM: usize, const RECEIVE_MAXIMUM: usize, const SEN
     pub(crate) fn outbound_pubrel(&mut self) -> Result<(), StateError> {
         match self.state {
             LocalPublishState::DuePublishAtLeastOnce | LocalPublishState::AwaitAck => {
-                Err(StateError::MismatchedQoS)
+                Err(StateError::QoSMismatched)
             }
             LocalPublishState::DuePublishExactlyOnce(_)
             | LocalPublishState::AwaitRec(_)
-            | LocalPublishState::AwaitComp(_) => Err(StateError::MismatchedHandshakeState),
+            | LocalPublishState::AwaitComp(_) => Err(StateError::HandshakeStateMismatched),
             LocalPublishState::DueRel => {
                 self.set(LocalPublishState::AwaitComp(AckMode::Manual));
                 Ok(())

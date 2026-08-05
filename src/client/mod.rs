@@ -768,7 +768,7 @@ impl<
         if (matches!(options.qos, QoS::AtMostOnce | QoS::AtLeastOnce)
             && options.ack_mode == AckMode::Manual)
         {
-            return Err(MqttError::ManualAckImpossible);
+            return Err(MqttError::ManualAckNotAllowed);
         }
 
         if options.qos > self.server_config.maximum_qos {
@@ -793,6 +793,7 @@ impl<
                 info!("server receive maximum reached");
                 return Err(MqttError::SendQuotaExceeded);
             }
+            // TODO
             // if !self.session.available_outbound_capacity() {
             //     info!("client maximum concurrent publications reached");
             //     return Err(MqttError::SessionBuffer);
@@ -853,12 +854,12 @@ impl<
             // we have tracked the packet as in flight and can republish it.
             if let Err(e) = handle.outbound_publish(options.qos, options.ack_mode) {
                 match e {
-                    StateError::NoCapacity => return Err(MqttError::SessionBuffer), // unreachable!("error should have been thrown before"),
-                    StateError::UnusedPacketIdentifier => unreachable!(),
-                    StateError::MismatchedQoS => {
+                    StateError::NoCapacity => return Err(MqttError::SessionBuffer), // TODO unreachable!("error should have been thrown before"),
+                    StateError::PacketIdentifierUnused => unreachable!(),
+                    StateError::QoSMismatched => {
                         unreachable!("the selected packet identifier is always unused")
                     }
-                    StateError::MismatchedHandshakeState => {
+                    StateError::HandshakeStateMismatched => {
                         unreachable!("the selected packet identifier is always unused")
                     }
                 }
@@ -1003,17 +1004,17 @@ impl<
                 StateError::NoCapacity => {
                     unreachable!("a republish can not fail due to missing capacity")
                 }
-                StateError::UnusedPacketIdentifier => {
+                StateError::PacketIdentifierUnused => {
                     return Err(MqttError::PacketIdentifierNotInFlight);
                 }
-                StateError::MismatchedQoS => {
+                StateError::QoSMismatched => {
                     warn!(
                         "packet identifier {} was originally published with other QoS",
                         packet_identifier
                     );
                     return Err(MqttError::QoSMismatched);
                 }
-                StateError::MismatchedHandshakeState => {
+                StateError::HandshakeStateMismatched => {
                     return Err(MqttError::HandshakeStateMismatched);
                 }
             }
@@ -1101,9 +1102,9 @@ impl<
             .outbound_puback(packet_identifier)
             .map_err(|e| match e {
                 StateError::NoCapacity => unreachable!(),
-                StateError::UnusedPacketIdentifier => MqttError::PacketIdentifierNotInFlight,
-                StateError::MismatchedQoS => MqttError::QoSMismatched,
-                StateError::MismatchedHandshakeState => MqttError::HandshakeStateMismatched,
+                StateError::PacketIdentifierUnused => MqttError::PacketIdentifierNotInFlight,
+                StateError::QoSMismatched => MqttError::QoSMismatched,
+                StateError::HandshakeStateMismatched => MqttError::HandshakeStateMismatched,
             })?;
 
         let puback = PubackPacket::<MAX_USER_PROPERTIES>::new(
@@ -1159,9 +1160,9 @@ impl<
             .outbound_pubrec(packet_identifier, reason_code)
             .map_err(|e| match e {
                 StateError::NoCapacity => unreachable!(),
-                StateError::UnusedPacketIdentifier => MqttError::PacketIdentifierNotInFlight,
-                StateError::MismatchedQoS => MqttError::QoSMismatched,
-                StateError::MismatchedHandshakeState => MqttError::HandshakeStateMismatched,
+                StateError::PacketIdentifierUnused => MqttError::PacketIdentifierNotInFlight,
+                StateError::QoSMismatched => MqttError::QoSMismatched,
+                StateError::HandshakeStateMismatched => MqttError::HandshakeStateMismatched,
             })?;
 
         let pubrec = PubrecPacket::<MAX_USER_PROPERTIES>::new(
@@ -1202,9 +1203,9 @@ impl<
             .outbound_pubrel(packet_identifier)
             .map_err(|e| match e {
                 StateError::NoCapacity => unreachable!(),
-                StateError::UnusedPacketIdentifier => MqttError::PacketIdentifierNotInFlight,
-                StateError::MismatchedQoS => MqttError::QoSMismatched,
-                StateError::MismatchedHandshakeState => MqttError::HandshakeStateMismatched,
+                StateError::PacketIdentifierUnused => MqttError::PacketIdentifierNotInFlight,
+                StateError::QoSMismatched => MqttError::QoSMismatched,
+                StateError::HandshakeStateMismatched => MqttError::HandshakeStateMismatched,
             })?;
 
         let pubrel = PubrelPacket::<MAX_USER_PROPERTIES>::new(
@@ -1244,9 +1245,9 @@ impl<
             .outbound_pubcomp(packet_identifier)
             .map_err(|e| match e {
                 StateError::NoCapacity => unreachable!(),
-                StateError::UnusedPacketIdentifier => MqttError::PacketIdentifierNotInFlight,
-                StateError::MismatchedQoS => MqttError::QoSMismatched,
-                StateError::MismatchedHandshakeState => MqttError::HandshakeStateMismatched,
+                StateError::PacketIdentifierUnused => MqttError::PacketIdentifierNotInFlight,
+                StateError::QoSMismatched => MqttError::QoSMismatched,
+                StateError::HandshakeStateMismatched => MqttError::HandshakeStateMismatched,
             })?;
 
         let pubcomp = PubcompPacket::<MAX_USER_PROPERTIES>::new(
