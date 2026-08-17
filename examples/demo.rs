@@ -20,7 +20,7 @@ use rust_mqtt::{
     config::{KeepAlive, SessionExpiryInterval},
     types::{MqttBinary, MqttString, TopicFilter, TopicName, VarByteInt},
 };
-use tokio::{net::TcpStream, select, time::sleep};
+use tokio::{io::AsyncWriteExt, net::TcpStream, select, time::sleep};
 
 #[tokio::main]
 async fn main() {
@@ -337,7 +337,10 @@ async fn main() {
     }
 
     match client.disconnect(&DisconnectOptions::new()).await {
-        Ok(()) => info!("Disconnected from server"),
+        Ok(n) => {
+            n.into_inner().shutdown().await;
+            info!("Disconnected from server")
+        },
         Err(e) => {
             error!("Failed to disconnect from server: {e:?}");
             return;

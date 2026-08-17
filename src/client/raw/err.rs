@@ -53,3 +53,23 @@ impl<B> From<NetStateError> for Error<B> {
         Self::Disconnected
     }
 }
+
+/// The reason why a call to [`Client::abort`] failed.
+///
+/// [`Client::abort`]: crate::client::Client::abort
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AbortError {
+    /// The network connection and the MQTT protocol-level connection with the server is healthy.
+    /// [`Client::abort`] may not be called on a healthy connection, in this state
+    /// [`Client::disconnect`] can be used for a clean disconnection
+    ///
+    /// [`Client::abort`]: crate::client::Client::abort
+    /// [`Client::disconnect`]: crate::client::Client::disconnect
+    Connected,
+
+    /// No network connection is currently available for the client because no [`Client::connect`]
+    /// call has been made since the last call to either [`Client::abort`] or [`Client::disconnect`]
+    /// or no [`Client::connect`] call has been made yet in the lifetime of the client.
+    Terminated,
+}
