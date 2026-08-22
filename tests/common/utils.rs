@@ -61,6 +61,7 @@ pub async fn tcp_connection_raw(broker: SocketAddr) -> Result<TcpStream, MqttErr
         TcpStream::connect(broker).await,
         "Error while connecting TCP session"
     )
+    .inspect(|tcp| tcp.set_nodelay(true).unwrap())
     .map_err(|_| MqttError::RecoveryRequired)
 }
 
