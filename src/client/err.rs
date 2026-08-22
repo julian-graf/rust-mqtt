@@ -1,4 +1,4 @@
-use core::matches;
+use core::{convert::Infallible, matches};
 
 use heapless::Vec;
 
@@ -26,7 +26,7 @@ use crate::{
 /// [`Client::connect`]: crate::client::Client::connect
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Error<'e, const MAX_USER_PROPERTIES: usize> {
+pub enum Error<'e, const MAX_USER_PROPERTIES: usize, A = Infallible> {
     /// An underlying Read/Write method returned an error.
     ///
     /// Unrecoverable error. [`Client::abort`] should be called.
@@ -81,6 +81,8 @@ pub enum Error<'e, const MAX_USER_PROPERTIES: usize> {
         /// a server reference. Identifies another server which can be used.
         server_reference: Option<MqttString<'e>>,
     },
+
+    Auth(A),
 
     /// Another unrecoverable error has been returned earlier. The underlying connection is in a state,
     /// in which it refuses/is not able to perform regular communication.
@@ -314,13 +316,15 @@ impl<'e> Error<'e, 0> {
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize> From<Reserved> for Error<'_, MAX_USER_PROPERTIES> {
+impl<const MAX_USER_PROPERTIES: usize, A> From<Reserved> for Error<'_, MAX_USER_PROPERTIES, A> {
     fn from(_: Reserved) -> Self {
         Self::Server
     }
 }
 
-impl<B, const MAX_USER_PROPERTIES: usize> From<RawError<B>> for Error<'_, MAX_USER_PROPERTIES> {
+impl<B, const MAX_USER_PROPERTIES: usize, A> From<RawError<B>>
+    for Error<'_, MAX_USER_PROPERTIES, A>
+{
     fn from(e: RawError<B>) -> Self {
         match e {
             RawError::Disconnected => Self::RecoveryRequired,
@@ -331,7 +335,9 @@ impl<B, const MAX_USER_PROPERTIES: usize> From<RawError<B>> for Error<'_, MAX_US
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize> From<TooLargeToEncode> for Error<'_, MAX_USER_PROPERTIES> {
+impl<const MAX_USER_PROPERTIES: usize, A> From<TooLargeToEncode>
+    for Error<'_, MAX_USER_PROPERTIES, A>
+{
     fn from(_: TooLargeToEncode) -> Self {
         Self::PacketMaximumLengthExceeded
     }

@@ -14,6 +14,7 @@ use p256::{
 use pem_parser::pem_to_der;
 use rand::rngs::OsRng;
 use rust_mqtt::{
+    auth::NoEnhancedAuth,
     buffer::*,
     client::{
         Client,
@@ -68,7 +69,7 @@ async fn main() {
     #[cfg(feature = "bump")]
     let mut buffer = BumpBuffer::new(&mut buffer);
 
-    let mut client = Client::<'_, _, _, 1, 1, 1, 0, 1>::new(&mut buffer);
+    let mut client = Client::<'_, '_, _, _, 1, 1, 1, 0, 1>::new(&mut buffer);
 
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8883);
     let connection = TcpStream::connect(addr).await.unwrap();
@@ -96,7 +97,12 @@ async fn main() {
         .expect("error establishing TLS connection");
 
     match client
-        .connect(tls_connection, &ConnectOptions::new().clean_start(), None)
+        .connect(
+            tls_connection,
+            &ConnectOptions::new().clean_start(),
+            None,
+            None,
+        )
         .await
     {
         Ok(c) => info!("Connected to server: {c:?}"),

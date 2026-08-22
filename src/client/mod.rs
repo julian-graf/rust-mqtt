@@ -3,13 +3,14 @@
 use core::{matches, num::NonZero};
 
 use crate::{
+    auth::{Auth, AuthProvider},
     buffer::BufferProvider,
     bytes::Bytes,
     client::{
         event::{Connected, Event, Puback, Publish, Pubrej, Suback},
         options::{
-            AckMode, AckOptions, ConnectOptions, DisconnectOptions, PublicationOptions,
-            SubscriptionOptions, TopicReference, UnsubscriptionOptions,
+            AckMode, AckOptions, AuthOptions, ConnectOptions, DisconnectOptions,
+            PublicationOptions, SubscriptionOptions, TopicReference, UnsubscriptionOptions,
         },
         raw::Raw,
     },
@@ -25,9 +26,9 @@ use crate::{
     },
     v5::{
         packet::{
-            ConnackPacket, ConnectPacket, DisconnectPacket, PingreqPacket, PingrespPacket,
-            PubackPacket, PubcompPacket, PublishPacket, PubrecPacket, PubrelPacket, SubackPacket,
-            SubscribePacket, UnsubackPacket, UnsubscribePacket,
+            AuthPacket, ConnackPacket, ConnectPacket, DisconnectPacket, PingreqPacket,
+            PingrespPacket, PubackPacket, PubcompPacket, PublishPacket, PubrecPacket, PubrelPacket,
+            SubackPacket, SubscribePacket, UnsubackPacket, UnsubscribePacket,
         },
         property::Property,
     },
@@ -148,6 +149,7 @@ pub use raw::AbortError;
 ///   packets with unused packet identifiers that require a responding packet are received (PUBREC and PUBREL), no session entry
 ///   is created and the responding packet (PUBREL and PUBCOMP) is sent automatically by the client.
 pub struct Client<
+    'a,
     'c,
     N: Transport,
     B: BufferProvider<'c>,
@@ -157,7 +159,7 @@ pub struct Client<
     const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
     const MAX_USER_PROPERTIES: usize,
 > {
-    client_config: ClientConfig,
+    client_config: ClientConfig<'a>,
     shared_config: SharedConfig,
     server_config: ServerConfig,
     session: Session<SUBSCRIBE_MAXIMUM, RECEIVE_MAXIMUM, SEND_MAXIMUM>,
@@ -179,6 +181,7 @@ impl<
     const MAX_USER_PROPERTIES: usize,
 > core::fmt::Debug
     for Client<
+        '_,
         'c,
         N,
         B,
@@ -212,7 +215,8 @@ impl<
     const MAX_USER_PROPERTIES: usize,
 > defmt::Format
     for Client<
-        'c,
+        '_,
+        '_,
         N,
         B,
         SUBSCRIBE_MAXIMUM,
@@ -236,6 +240,7 @@ impl<
 }
 
 impl<
+    'a,
     'c,
     N: Transport,
     B: BufferProvider<'c>,
@@ -246,6 +251,7 @@ impl<
     const MAX_USER_PROPERTIES: usize,
 >
     Client<
+        'a,
         'c,
         N,
         B,
@@ -327,7 +333,7 @@ impl<
 
     /// Returns configuration for this client.
     #[inline]
-    pub fn client_config(&self) -> &ClientConfig {
+    pub fn client_config(&self) -> &ClientConfig<'a> {
         &self.client_config
     }
 
@@ -447,6 +453,10 @@ impl<
         // other than PUBLISH, CONNACK, or DISCONNECT
         self.client_config.request_problem_information = options.request_problem_information;
 
+        // Set authentication method because it is required for further checks for
+        // CONNACK and AUTH packets.
+        self.client_config.authentication_method = None;
+
         // Empirical maximum packet size mapping
         // -------------------------------------------------------------------------------------------------------
         //         remaining length              | fixed header length |              max packet size
@@ -502,6 +512,10 @@ impl<
                     .collect(),
             );
 
+            if let Some(ref authentication_data) = options.authentication_data {
+                packet.add_authentication_data(authentication_data.as_borrowed().into());
+            }
+
             if let Some(ref user_name) = options.user_name {
                 packet.add_user_name(user_name.as_borrowed());
             }
@@ -524,10 +538,12 @@ impl<
         let header = self.raw.recv_header().await?;
 
         match header.packet_type() {
-            Ok(ConnackPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => debug!(
-                "received CONNACK packet header (remaining length: {})",
-                header.remaining_len.value()
-            ),
+            Ok(ConnackPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => {
+                debug!(
+                    "received CONNACK packet header (remaining length: {})",
+                    header.remaining_len.value()
+                );
+            }
             Ok(t) => {
                 error!("received unexpected {:?} packet header", t);
 
@@ -559,10 +575,18 @@ impl<
             server_keep_alive,
             response_information,
             server_reference,
+            authentication_method,
+            authentication_data,
         } = self.raw.recv_body(&header).await?;
 
         if !options.request_response_information && response_information.is_some() {
             error!("server sent response information when request response information was false");
+            self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+            return Err(MqttError::Server);
+        }
+
+        if authentication_method.is_some() {
+            error!("server sent an authentication method when CONNECT didn't contain one");
             self.raw.prepare_disconnect(ReasonCode::ProtocolError);
             return Err(MqttError::Server);
         }
@@ -574,7 +598,7 @@ impl<
                 .map(Property::into_inner)
                 .or(client_identifier)
                 .ok_or_else(|| {
-                    error!("server did not assign a client identifier when it was required.");
+                    error!("server did not assign a client identifier when it was required");
                     self.raw.prepare_disconnect(ReasonCode::ProtocolError);
                     MqttError::Server
                 })?;
@@ -639,6 +663,433 @@ impl<
                     .collect(),
                 response_information: response_information.map(Property::into_inner),
                 server_reference: server_reference.map(Property::into_inner),
+                authentication_data: authentication_data.map(Property::into_inner),
+            })
+        } else {
+            debug!("CONNACK packet indicates rejection");
+            info!("connection rejected by server (reason: {:?})", reason_code);
+
+            self.raw.prepare_close();
+
+            info!("disconnected from server");
+
+            Err(MqttError::Disconnect {
+                reason: reason_code,
+                reason_string: reason_string.map(Property::into_inner),
+                user_properties: user_properties
+                    .into_iter()
+                    .map(Property::into_inner)
+                    .collect(),
+                server_reference: server_reference.map(Property::into_inner),
+            })
+        }
+    }
+
+    /// Establishes a connection to an MQTT server over the provided [`Transport`].
+    ///
+    /// Sends a CONNECT packet and awaits the CONNACK response by the server. It initializes
+    /// the internal state of the client, including session information and negotiated server
+    /// capabilities.
+    ///
+    /// This function must only be called if:
+    /// - The client is newly constructed and has not yet been connected.
+    /// - A previous connection was closed gracefully via [`Client::disconnect`].
+    /// - An unrecoverable error occurred and the error handling was performed with
+    ///   [`Client::abort`].
+    ///
+    /// Configuration that was negotiated with the server is stored in the `client_config`,
+    /// `server_config`, `shared_config`, and `session` fields, which have getters
+    /// ([`Client::client_config`], [`Client::server_config`], [`Client::shared_config`],
+    /// [`Client::session`]).
+    ///
+    /// If the server indicates that no session is present (Session Present flag is 0), the
+    /// client's local session state is cleared. To persist state across connections,
+    /// call [`Client::session`] to clone the state before calling this method.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok(Connected)`]: Contains information from the CONNACK packet that is not persisted
+    ///   in the client's internal configuration fields.
+    /// - [`Err(MqttError)`]: If the connection attempt failed.
+    ///
+    /// # Errors
+    ///
+    /// * [`MqttError::Server`] if:
+    ///   * the server sends a malformed packet
+    ///   * the first received packet is something other than a CONNACK packet
+    ///   * `client_identifier` is [`None`] and the server did not assign a client identifier
+    ///   * the server causes a protocol error
+    ///   * the server sends Response Information despite `request_response_information` in [`ConnectOptions`]
+    ///     being 0
+    /// * [`MqttError::Disconnect`] if the CONNACK packet's reason code is not successful (>= 0x80)
+    /// * [`MqttError::Network`] if the underlying [`Transport`] returned an error
+    /// * [`MqttError::Alloc`] if the underlying [`BufferProvider`] returned an error
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the length of the `user_properties` slice in the [`ConnectOptions`]
+    /// or the length of the `user_properties` slice in the [`WillOptions`] in [`ConnectOptions`]
+    /// is greater than `MAX_USER_PROPERTIES`.
+    ///
+    /// [`Ok(Connected)`]: crate::client::event::Connected
+    /// [`Err(MqttError)`]: crate::client::MqttError
+    /// [`WillOptions`]: crate::client::options::WillOptions
+    pub async fn connect_enhanced<'d, A: AuthProvider>(
+        &mut self,
+        net: N,
+        options: &ConnectOptions<'_>,
+        client_identifier: Option<MqttString<'d>>,
+        authentication_method: MqttString<'a>,
+        auth_provider: &mut A,
+    ) -> Result<Connected<'d, MAX_USER_PROPERTIES>, MqttError<'c, MAX_USER_PROPERTIES, A::Error>>
+    where
+        'c: 'd,
+    {
+        assert!(
+            options.user_properties.len() <= MAX_USER_PROPERTIES,
+            "attempted to send CONNECT with {} > {} (MAX_USER_PROPERTIES) properties",
+            options.user_properties.len(),
+            MAX_USER_PROPERTIES
+        );
+        if let Some(ref will) = options.will {
+            assert!(
+                will.user_properties.len() <= MAX_USER_PROPERTIES,
+                "attempted to send Will with {} > {} (MAX_USER_PROPERTIES) properties",
+                will.user_properties.len(),
+                MAX_USER_PROPERTIES
+            );
+        }
+
+        self.raw.set_net(net);
+
+        // Set client session expiry interval because it is relevant to determine
+        // which session expiry interval can be sent in DISCONNECT packet.
+        self.client_config.session_expiry_interval = options.session_expiry_interval;
+
+        // Set request problem information because it is required to detect protocol
+        // errors when server sends a reason string or user properties in any packet
+        // other than PUBLISH, CONNACK, or DISCONNECT
+        self.client_config.request_problem_information = options.request_problem_information;
+
+        // Set authentication method because it is required for further checks for
+        // CONNACK and AUTH packets.
+        self.client_config.authentication_method = Some(authentication_method);
+
+        // Empirical maximum packet size mapping
+        // -------------------------------------------------------------------------------------------------------
+        //         remaining length              | fixed header length |              max packet size
+        //                               0..=127 |                   2 |                                   2..=129
+        //                          128..=16_383 |                   3 |                              131..=16_386
+        //                    16_384..=2_097_151 |                   4 |                        16_388..=2_097_155
+        // 2_097_152..=VarByteInt::MAX_ENCODABLE |                   5 | 2_097_157..=(VarByteInt::MAX_ENCODABLE+5)
+
+        const MAX_POSSIBLE_PACKET_SIZE: u32 = VarByteInt::MAX_ENCODABLE + 5;
+
+        self.client_config.maximum_accepted_remaining_length = match options.maximum_packet_size {
+            MaximumPacketSize::Unlimited => u32::MAX,
+            MaximumPacketSize::Limit(l) => match l.get() {
+                0 => unreachable!("NonZero invariant"),
+                1 => panic!(
+                    "every MQTT packet is at least 2 bytes long, a smaller maximum packet size makes no sense"
+                ),
+                2..=129 => l.get() - 2,
+                130..=16_386 => l.get() - 3,
+                16_387..=2_097_155 => l.get() - 4,
+                2_097_156..MAX_POSSIBLE_PACKET_SIZE => l.get() - 5,
+                MAX_POSSIBLE_PACKET_SIZE.. => VarByteInt::MAX_ENCODABLE,
+            },
+        };
+
+        trace!(
+            "maximum accepted remaining length set to {:?}",
+            self.client_config.maximum_accepted_remaining_length
+        );
+
+        {
+            let packet_client_identifier = client_identifier
+                .as_ref()
+                .map(MqttString::as_borrowed)
+                .unwrap_or_default();
+
+            let mut packet = ConnectPacket::<MAX_USER_PROPERTIES>::new(
+                packet_client_identifier,
+                options.clean_start,
+                options.keep_alive,
+                options.maximum_packet_size,
+                options.session_expiry_interval,
+                // Safety: `Self::new` panics if `RECEIVE_MAXIMUM` is 0. Thus, this
+                // code is only reached when `RECEIVE_MAXIMUM` is greater than 0.
+                unsafe { NonZero::new_unchecked(RECEIVE_MAXIMUM as u16) },
+                options.request_response_information,
+                options.request_problem_information,
+                options
+                    .user_properties
+                    .iter()
+                    .map(MqttStringPair::as_borrowed)
+                    .map(Into::into)
+                    .collect(),
+            );
+
+            if let Some(ref authentication_method) = self.client_config.authentication_method {
+                packet.add_authentication_method(authentication_method.as_borrowed().into());
+            }
+            if let Some(ref authentication_data) = options.authentication_data {
+                packet.add_authentication_data(authentication_data.as_borrowed().into());
+            }
+
+            if let Some(ref user_name) = options.user_name {
+                packet.add_user_name(user_name.as_borrowed());
+            }
+            if let Some(ref password) = options.password {
+                packet.add_password(password.as_borrowed());
+            }
+
+            if let Some(ref will) = options.will {
+                let will_qos = will.will_qos;
+                let will_retain = will.will_retain;
+
+                packet.add_will(will.as_borrowed_will(), will_qos, will_retain);
+            }
+
+            debug!("sending CONNECT packet");
+            self.raw.send(&packet).await?;
+            self.raw.flush().await?;
+        }
+
+        let header = loop {
+            let header = self.raw.recv_header().await?;
+
+            match header.packet_type() {
+                Ok(ConnackPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => {
+                    debug!(
+                        "received CONNACK packet header (remaining length: {})",
+                        header.remaining_len.value()
+                    );
+                    break header;
+                }
+                Ok(AuthPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE)
+                    if self.client_config.authentication_method.is_some() =>
+                {
+                    debug!(
+                        "received AUTH packet header (remaining length: {})",
+                        header.remaining_len.value()
+                    )
+                }
+                Ok(t) => {
+                    error!("received unexpected {:?} packet header", t);
+
+                    self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                    return Err(MqttError::Server);
+                }
+                Err(_) => {
+                    error!("received invalid header {:?}", header);
+                    self.raw.prepare_disconnect(ReasonCode::MalformedPacket);
+                    return Err(MqttError::Server);
+                }
+            }
+            let AuthPacket::<MAX_USER_PROPERTIES> {
+                reason_code,
+                authentication_method,
+                authentication_data,
+                reason_string,
+                user_properties,
+            } = self.raw.recv_body(&header).await?;
+
+            if matches!(
+                reason_code,
+                ReasonCode::Success | ReasonCode::ReAuthenticate
+            ) {
+                error!("server sent invalid reason code");
+                self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                return Err(MqttError::Server);
+            }
+
+            if !self.client_config.request_problem_information
+                && (reason_string.is_some() || !user_properties.is_empty())
+            {
+                error!(
+                    "server sent reason string or user properties when request problem information was false"
+                );
+                self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                return Err(MqttError::Server);
+            }
+
+            if &authentication_method.into_inner()
+                != self.client_config.authentication_method.as_ref().unwrap()
+            {
+                error!("server sent an authentication method different from the required value");
+                self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                return Err(MqttError::Server);
+            }
+
+            let auth = Auth::<MAX_USER_PROPERTIES> {
+                authentication_data: authentication_data.map(Property::into_inner),
+                reason_string: reason_string.map(Property::into_inner),
+                user_properties: user_properties
+                    .into_iter()
+                    .map(Property::into_inner)
+                    .collect(),
+            };
+
+            let Auth {
+                authentication_data,
+                reason_string,
+                user_properties,
+            } = match auth_provider.kontinue(&auth) {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("authentication failed");
+                    self.raw.prepare_close();
+                    return Err(MqttError::Auth(e));
+                }
+            };
+
+            let packet = AuthPacket::<MAX_USER_PROPERTIES>::new(
+                ReasonCode::ContinueAuthentication,
+                self.client_config
+                    .authentication_method
+                    .as_ref()
+                    .unwrap()
+                    .as_borrowed()
+                    .into(),
+                authentication_data.map(Into::into),
+                reason_string.map(Into::into),
+                user_properties.into_iter().map(Into::into).collect(),
+            );
+
+            debug!("sending AUTH packet");
+            self.raw.send(&packet).await?;
+            self.raw.flush().await?;
+        };
+
+        let ConnackPacket::<MAX_USER_PROPERTIES> {
+            session_present,
+            reason_code,
+            session_expiry_interval,
+            receive_maximum,
+            maximum_qos,
+            retain_available,
+            maximum_packet_size,
+            assigned_client_identifier,
+            topic_alias_maximum,
+            reason_string,
+            user_properties,
+            wildcard_subscription_available,
+            subscription_identifier_available,
+            shared_subscription_available,
+            server_keep_alive,
+            response_information,
+            server_reference,
+            authentication_method,
+            authentication_data,
+        } = self.raw.recv_body(&header).await?;
+
+        if !options.request_response_information && response_information.is_some() {
+            error!("server sent response information when request response information was false");
+            self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+            return Err(MqttError::Server);
+        }
+
+        if self.client_config.authentication_method.is_none() && authentication_method.is_some() {
+            error!("server sent an authentication method when CONNECT didn't contain one");
+            self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+            return Err(MqttError::Server);
+        }
+
+        if reason_code.is_success() {
+            debug!("CONNACK packet indicates success");
+
+            let client_identifier = assigned_client_identifier
+                .map(Property::into_inner)
+                .or(client_identifier)
+                .ok_or_else(|| {
+                    error!("server did not assign a client identifier when it was required");
+                    self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                    MqttError::Server
+                })?;
+
+            if let Some(ref connect_authentication_method) =
+                self.client_config.authentication_method
+            {
+                if let Some(connack_authentication_method) = authentication_method {
+                    if connect_authentication_method != &connack_authentication_method.into_inner()
+                    {
+                        error!(
+                            "server sent an authentication method different from the required value"
+                        );
+                        self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                        return Err(MqttError::Server);
+                    }
+                } else {
+                    error!(
+                        "server didn't send an authentication method in successful CONNACK packet when it was required"
+                    );
+                    self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                    return Err(MqttError::Server);
+                }
+            }
+
+            if session_present {
+                if options.clean_start {
+                    error!("server set the session present flag when clean start was set");
+                    self.raw.prepare_disconnect(ReasonCode::ProtocolError);
+                    return Err(MqttError::Server);
+                } else {
+                    info!("connected to server and reconnected to session");
+                    self.session.reconnect();
+                }
+            } else {
+                #[allow(clippy::if_same_then_else)]
+                if options.clean_start {
+                    info!("connected to server");
+                } else {
+                    info!(
+                        "connected to server but server does not have the requested session present"
+                    );
+                }
+                self.session.clear();
+            }
+
+            self.shared_config.session_expiry_interval =
+                session_expiry_interval.unwrap_or(options.session_expiry_interval);
+            self.shared_config.keep_alive =
+                server_keep_alive.map_or(options.keep_alive, Property::into_inner);
+
+            if let Some(r) = receive_maximum {
+                self.server_config.receive_maximum = r.into_inner();
+            }
+            if let Some(m) = maximum_qos {
+                self.server_config.maximum_qos = m.into_inner();
+            }
+            if let Some(r) = retain_available {
+                self.server_config.retain_supported = r.into_inner();
+            }
+            if let Some(m) = maximum_packet_size {
+                self.server_config.maximum_packet_size = m;
+            }
+            if let Some(t) = topic_alias_maximum {
+                self.server_config.topic_alias_maximum = t.into_inner();
+            }
+            if let Some(w) = wildcard_subscription_available {
+                self.server_config.wildcard_subscription_supported = w.into_inner();
+            }
+            if let Some(s) = subscription_identifier_available {
+                self.server_config.subscription_identifiers_supported = s.into_inner();
+            }
+            if let Some(s) = shared_subscription_available {
+                self.server_config.shared_subscription_supported = s.into_inner();
+            }
+
+            Ok(Connected {
+                session_present,
+                client_identifier,
+                user_properties: user_properties
+                    .into_iter()
+                    .map(Property::into_inner)
+                    .collect(),
+                response_information: response_information.map(Property::into_inner),
+                server_reference: server_reference.map(Property::into_inner),
+                authentication_data: authentication_data.map(Property::into_inner),
             })
         } else {
             debug!("CONNACK packet indicates rejection");

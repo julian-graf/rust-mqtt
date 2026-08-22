@@ -20,6 +20,7 @@ use embedded_io_adapters::tokio_1::FromTokio;
 use log::{error, info};
 use rust_mqtt::{
     Bytes,
+    auth::NoEnhancedAuth,
     buffer::*,
     client::{
         Client,
@@ -45,7 +46,7 @@ async fn main() {
     #[cfg(feature = "bump")]
     let mut buffer = BumpBuffer::new(&mut buffer);
 
-    let mut client = Client::<'_, _, _, 1, 3, 3, 0, 16>::new(&mut buffer);
+    let mut client = Client::<'_, '_, _, _, 1, 3, 3, 0, 16>::new(&mut buffer);
 
     // Acknowledge all packets manually which have a payload format indicator property with a value of
     // true (claiming that the payload is UTF-8). We intentionally leave the check for actual UTF-8
@@ -67,6 +68,7 @@ async fn main() {
                 .user_name(MqttString::try_from("test").unwrap())
                 .password(MqttBinary::try_from("testPass").unwrap())
                 .clean_start(),
+            None,
             None,
         )
         .await

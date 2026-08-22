@@ -8,6 +8,7 @@ use embedded_io_adapters::tokio_1::FromTokio;
 use log::{error, info};
 use rust_mqtt::{
     Bytes,
+    auth::NoEnhancedAuth,
     buffer::*,
     client::{
         Client,
@@ -33,7 +34,7 @@ async fn main() {
     #[cfg(feature = "bump")]
     let mut buffer = BumpBuffer::new(&mut buffer);
 
-    let mut client = Client::<'_, _, _, 1, 1, 1, 1, 16>::new(&mut buffer);
+    let mut client = Client::<'_, '_, _, _, 1, 1, 1, 1, 16>::new(&mut buffer);
 
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1883);
     let connection = TcpStream::connect(addr).await.unwrap();
@@ -60,6 +61,7 @@ async fn main() {
                     .content_type(MqttString::try_from("txt").unwrap()),
                 ),
             Some(MqttString::try_from("rust-mqtt-demo-client").unwrap()),
+            None,
         )
         .await
     {
@@ -269,7 +271,7 @@ async fn main() {
     let mut buffer = BumpBuffer::new(&mut buffer);
 
     // Continue the previous session
-    let mut client = Client::<'_, _, _, 1, 1, 1, 1, 16>::with_session(session, &mut buffer);
+    let mut client = Client::<'_, '_, _, _, 1, 1, 1, 1, 16>::with_session(session, &mut buffer);
 
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1883);
     let connection = TcpStream::connect(addr).await.unwrap();
@@ -282,6 +284,7 @@ async fn main() {
                 .user_name(MqttString::try_from("test").unwrap())
                 .password(MqttBinary::try_from("testPass").unwrap()),
             Some(MqttString::try_from("rust-mqtt-demo-client").unwrap()),
+            None,
         )
         .await
     {
