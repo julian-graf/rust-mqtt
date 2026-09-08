@@ -4,7 +4,7 @@ use heapless::Vec;
 use crate::{
     client::options::{RetainHandling, SubscriptionOptions},
     eio::Write,
-    fmt::const_debug_assert,
+    fmt::{const_debug_assert, debug_assert},
     io::{
         err::WriteError,
         write::{Writable, wlen},
@@ -19,12 +19,31 @@ use crate::{
 /// - "sport/tennis/player1"
 /// - "sport/tennis/player1/ranking"
 /// - "sport/tennis/player1/score/wimbledon"
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct TopicName<'t>(MqttString<'t>);
+pub struct TopicName<'t, S = &'t [u8]>(MqttString<'t, S>);
 
-impl<'t> TopicName<'t> {
-    const fn is_valid(s: &MqttString) -> bool {
+impl<'t, S: AsRef<[u8]>> core::fmt::Debug for TopicName<'t, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("TopicName").field(&self.0).finish()
+    }
+}
+#[cfg(feature = "defmt")]
+impl<'t, S: AsRef<[u8]>> defmt::Format for TopicName<'t, S> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "TopicName({:?})", self.0);
+    }
+}
+
+impl<'t, S: AsRef<[u8]>> PartialEq for TopicName<'t, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<'t, S: AsRef<[u8]>> Eq for TopicName<'t, S> {}
+
+impl<'t, S: AsRef<[u8]>> TopicName<'t, S> {
+    fn is_valid(s: &MqttString<'_, S>) -> bool {
         let s = s.as_str().as_bytes();
 
         // [MQTT-4.7.3-1]
@@ -57,7 +76,7 @@ impl<'t> TopicName<'t> {
     /// Creates a new topic name while checking for correct syntax of the topic name string.
     #[const_fn(cfg(not(feature = "alloc")))]
     #[must_use]
-    pub fn new(string: MqttString<'t>) -> Option<Self> {
+    pub fn new(string: MqttString<'t, S>) -> Option<Self> {
         if Self::is_valid(&string) {
             Some(Self(string))
         } else {
@@ -73,8 +92,8 @@ impl<'t> TopicName<'t> {
     /// # Panics
     /// In debug builds, this function will panic if the syntax of `string` is incorrect.
     #[must_use]
-    pub const fn new_unchecked(string: MqttString<'t>) -> Self {
-        const_debug_assert!(
+    pub fn new_unchecked(string: MqttString<'t, S>) -> Self {
+        debug_assert!(
             Self::is_valid(&string),
             "the provided string is not valid TopicName syntax"
         );
@@ -87,18 +106,18 @@ impl<'t> TopicName<'t> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub const fn as_borrowed(&'t self) -> Self {
-        Self(self.0.as_borrowed())
+    pub fn as_borrowed(&'t self) -> TopicName<'_, &'_ [u8]> {
+        TopicName(self.0.as_borrowed())
     }
 }
 
-impl<'t> AsRef<MqttString<'t>> for TopicName<'t> {
-    fn as_ref(&self) -> &MqttString<'t> {
+impl<'t, S> AsRef<MqttString<'t, S>> for TopicName<'t, S> {
+    fn as_ref(&self) -> &MqttString<'t, S> {
         &self.0
     }
 }
-impl<'t> From<TopicName<'t>> for MqttString<'t> {
-    fn from(value: TopicName<'t>) -> Self {
+impl<'t, S> From<TopicName<'t, S>> for MqttString<'t, S> {
+    fn from(value: TopicName<'t, S>) -> MqttString<'t, S> {
         value.0
     }
 }
@@ -109,12 +128,31 @@ impl<'t> From<TopicName<'t>> for MqttString<'t> {
 /// Examples:
 /// - "sport/tennis/#"
 /// - "sport/+/player1"
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct TopicFilter<'t>(MqttString<'t>);
+pub struct TopicFilter<'t, S = &'t [u8]>(MqttString<'t, S>);
 
-impl<'t> TopicFilter<'t> {
-    const fn is_valid(s: &MqttString) -> bool {
+impl<'t, S: AsRef<[u8]>> core::fmt::Debug for TopicFilter<'t, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("TopicFilter").field(&self.0).finish()
+    }
+}
+#[cfg(feature = "defmt")]
+impl<'a, S: AsRef<[u8]>> defmt::Format for TopicFilter<'a, S> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "TopicFilter({:?})", self.0);
+    }
+}
+
+impl<'t, S: AsRef<[u8]>> PartialEq for TopicFilter<'t, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<'t, S: AsRef<[u8]>> Eq for TopicFilter<'t, S> {}
+
+impl<'t, S: AsRef<[u8]>> TopicFilter<'t, S> {
+    fn is_valid(s: &MqttString<'_, S>) -> bool {
         let s = s.as_str().as_bytes();
 
         // [MQTT-4.7.3-1]
@@ -217,7 +255,7 @@ impl<'t> TopicFilter<'t> {
     }
 
     /// Returns whether the topic filter is the topic filter of a shared subscription.
-    pub const fn is_shared(&self) -> bool {
+    pub fn is_shared(&self) -> bool {
         let s = self.0.as_str().as_bytes();
 
         s.len() >= 10
@@ -230,7 +268,7 @@ impl<'t> TopicFilter<'t> {
     }
 
     /// Returns whether the topic filter contains one or more of the wildcard characters `#` or `+`.
-    pub const fn has_wildcard(&self) -> bool {
+    pub fn has_wildcard(&self) -> bool {
         let s = self.0.as_str().as_bytes();
 
         let mut i = 0;
@@ -252,7 +290,7 @@ impl<'t> TopicFilter<'t> {
     /// filter are also enforced.
     #[const_fn(cfg(not(feature = "alloc")))]
     #[must_use]
-    pub fn new(string: MqttString<'t>) -> Option<Self> {
+    pub fn new(string: MqttString<'t, S>) -> Option<Self> {
         if Self::is_valid(&string) {
             Some(Self(string))
         } else {
@@ -268,8 +306,8 @@ impl<'t> TopicFilter<'t> {
     /// # Panics
     /// In debug builds, this function will panic if the syntax of `string` is incorrect.
     #[must_use]
-    pub const fn new_unchecked(string: MqttString<'t>) -> Self {
-        const_debug_assert!(
+    pub fn new_unchecked(string: MqttString<'t, S>) -> Self {
+        debug_assert!(
             Self::is_valid(&string),
             "the provided string is not valid TopicFilter syntax"
         );
@@ -282,18 +320,18 @@ impl<'t> TopicFilter<'t> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub const fn as_borrowed(&'t self) -> Self {
-        Self(self.0.as_borrowed())
+    pub fn as_borrowed(&'t self) -> TopicFilter {
+        TopicFilter(self.0.as_borrowed())
     }
 }
 
-impl<'t> AsRef<MqttString<'t>> for TopicFilter<'t> {
-    fn as_ref(&self) -> &MqttString<'t> {
+impl<'t, S> AsRef<MqttString<'t, S>> for TopicFilter<'t, S> {
+    fn as_ref(&self) -> &MqttString<'t, S> {
         &self.0
     }
 }
-impl<'t> From<TopicFilter<'t>> for MqttString<'t> {
-    fn from(value: TopicFilter<'t>) -> Self {
+impl<'t, S> From<TopicFilter<'t, S>> for MqttString<'t, S> {
+    fn from(value: TopicFilter<'t, S>) -> Self {
         value.0
     }
 }
@@ -374,7 +412,7 @@ mod unit {
 
     macro_rules! assert_valid {
         ($t:ty, $l:literal) => {{
-            let s = assert_ok!(MqttString::from_str($l), "{}", $l);
+            let s = assert_ok!(MqttString::<&str>::from_str($l), "{}", $l);
             let t = <$t>::new(s);
             assert!(t.is_some(), "{}", $l);
             let t = t.unwrap();
@@ -384,7 +422,7 @@ mod unit {
     }
     macro_rules! assert_valid_shared {
         ($t:ty, $l:literal) => {{
-            let s = assert_ok!(MqttString::from_str($l), "{}", $l);
+            let s = assert_ok!(MqttString::<&str>::from_str($l), "{}", $l);
             let t = <$t>::new(s);
             assert!(t.is_some(), "{}", $l);
             let t = t.unwrap();
@@ -395,7 +433,7 @@ mod unit {
     }
     macro_rules! assert_valid_non_shared {
         ($t:ty, $l:literal) => {{
-            let s = assert_ok!(MqttString::from_str($l), "{}", $l);
+            let s = assert_ok!(MqttString::<&str>::from_str($l), "{}", $l);
             let t = <$t>::new(s);
             assert!(t.is_some(), "{}", $l);
             let t = t.unwrap();
@@ -406,7 +444,7 @@ mod unit {
     }
     macro_rules! assert_invalid {
         ($t:ty, $l:literal) => {
-            match MqttString::from_str($l) {
+            match MqttString::<&str>::from_str($l) {
                 Ok(s) => assert!(<$t>::new(s).is_none(), "{}", $l),
                 Err(_) => {}
             }
@@ -415,7 +453,7 @@ mod unit {
 
     #[test]
     fn topic_name_zero_characters() {
-        assert_invalid!(TopicName, "");
+        assert_invalid!(TopicName<_>, "");
     }
 
     #[test]

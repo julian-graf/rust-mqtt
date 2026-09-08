@@ -1,8 +1,6 @@
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, vec::Vec};
 
-use const_fn::const_fn;
-
 use crate::{
     bytes::Bytes,
     fmt::const_debug_assert,
@@ -25,14 +23,14 @@ use crate::{
 /// assert_eq!(b.as_bytes(), &slice);
 /// assert!(MqttBinary::from_slice(&too_long).is_err());
 ///
-/// let b = MqttBinary::from_bytes(Bytes::Borrowed(&slice))?;
+/// let b = MqttBinary::from_bytes(Bytes::from(&slice[..]))?;
 /// assert_eq!(b.as_bytes(), &slice);
-/// assert!(MqttBinary::from_bytes(Bytes::Borrowed(&too_long)).is_err());
+/// assert!(MqttBinary::from_bytes(Bytes::from(&too_long[..])).is_err());
 ///
 /// let from_slice_unchecked = MqttBinary::from_slice_unchecked(&slice);
 /// assert_eq!(from_slice_unchecked.as_bytes(), &slice);
 ///
-/// let from_bytes_unchecked = MqttBinary::from_bytes_unchecked(Bytes::Borrowed(&slice));
+/// let from_bytes_unchecked = MqttBinary::from_bytes_unchecked(Bytes::from(&slice[..]));
 /// assert_eq!(from_bytes_unchecked.as_bytes(), &slice);
 ///
 /// let from_vec = MqttBinary::try_from(vec![0, 1, 2])?;
@@ -43,17 +41,30 @@ use crate::{
 ///
 /// # Ok::<(), TooLargeToEncode>(())
 /// ```
-#[derive(Default, Clone, PartialEq, Eq)]
-pub struct MqttBinary<'b>(pub(crate) Bytes<'b>);
+#[derive(Clone)]
+pub struct MqttBinary<'b, B = &'b [u8]>(pub(crate) Bytes<'b, B>);
 
-impl core::fmt::Debug for MqttBinary<'_> {
+impl<'b, B: AsRef<[u8]>> PartialEq for MqttBinary<'b, B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<'b, B: AsRef<[u8]>> Eq for MqttBinary<'b, B> {}
+
+impl<'b> Default for MqttBinary<'b> {
+    fn default() -> Self {
+        Self(Bytes::default())
+    }
+}
+
+impl<B: AsRef<[u8]>> core::fmt::Debug for MqttBinary<'_, B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("MqttBinary").field(&self.as_ref()).finish()
     }
 }
 
 #[cfg(feature = "defmt")]
-impl<'a> defmt::Format for MqttBinary<'a> {
+impl<'a, B: AsRef<[u8]>> defmt::Format for MqttBinary<'a, B> {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "MqttBinary({:?})", self.as_ref());
     }
@@ -63,18 +74,18 @@ impl<'b> TryFrom<&'b [u8]> for MqttBinary<'b> {
     type Error = TooLargeToEncode;
 
     fn try_from(value: &'b [u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
+        Self::new(value)
     }
 }
 impl<'b> TryFrom<&'b str> for MqttBinary<'b> {
     type Error = TooLargeToEncode;
 
     fn try_from(value: &'b str) -> Result<Self, Self::Error> {
-        Self::from_slice(value.as_bytes())
+        Self::new(value.as_bytes())
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<Vec<u8>> for MqttBinary<'_> {
+impl TryFrom<Vec<u8>> for MqttBinary<'static, Box<[u8]>> {
     type Error = TooLargeToEncode;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -82,43 +93,29 @@ impl TryFrom<Vec<u8>> for MqttBinary<'_> {
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<Box<[u8]>> for MqttBinary<'_> {
+impl TryFrom<Box<[u8]>> for MqttBinary<'static, Box<[u8]>> {
     type Error = TooLargeToEncode;
 
     fn try_from(value: Box<[u8]>) -> Result<Self, Self::Error> {
-        Self::from_bytes(Bytes::Owned(value))
+        Self::new(Bytes::from(value))
     }
 }
 
-impl<'b> From<MqttString<'b>> for MqttBinary<'b> {
-    fn from(value: MqttString<'b>) -> Self {
+impl<'b, B: AsRef<[u8]>> From<MqttString<'b, B>> for MqttBinary<'b, B> {
+    fn from(value: MqttString<'b, B>) -> Self {
         Self(value.0.0)
     }
 }
 
-impl AsRef<[u8]> for MqttBinary<'_> {
+impl<B: AsRef<[u8]>> AsRef<[u8]> for MqttBinary<'_, B> {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl<'b> MqttBinary<'b> {
+impl<'b, B: AsRef<[u8]>> MqttBinary<'b, B> {
     /// The maximum length of binary data so that it can be encoded. This value is limited by the 2-byte length field.
     pub const MAX_LENGTH: usize = u16::MAX as usize;
-
-    /// Converts [`Bytes`] into [`MqttBinary`] by checking for the max length of
-    /// [`MqttBinary::MAX_LENGTH`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TooLargeToEncode`] if `bytes`' length exceeds [`MqttBinary::MAX_LENGTH`].
-    #[const_fn(cfg(not(feature = "alloc")))]
-    pub const fn from_bytes(bytes: Bytes<'b>) -> Result<Self, TooLargeToEncode> {
-        match bytes.len() {
-            ..=Self::MAX_LENGTH => Ok(Self(bytes)),
-            _ => Err(TooLargeToEncode),
-        }
-    }
 
     /// Converts a slice into [`MqttBinary`] by cloning the reference and checking for the max
     /// length of [`MqttBinary::MAX_LENGTH`].
@@ -126,36 +123,16 @@ impl<'b> MqttBinary<'b> {
     /// # Errors
     ///
     /// Returns [`TooLargeToEncode`] if `slice`'s length exceeds [`MqttBinary::MAX_LENGTH`].
-    pub const fn from_slice(slice: &'b [u8]) -> Result<Self, TooLargeToEncode> {
-        match slice.len() {
-            ..=Self::MAX_LENGTH => Ok(Self(Bytes::Borrowed(slice))),
+    pub fn new(b: impl Into<Bytes<'b, B>>) -> Result<Self, TooLargeToEncode> {
+        let bytes = b.into();
+
+        match bytes.len() {
+            ..=Self::MAX_LENGTH => Ok(Self::new_unchecked(bytes)),
             _ => Err(TooLargeToEncode),
         }
     }
 
-    /// Converts [`Bytes`] into [`MqttBinary`] without checking for the max length of
-    /// [`MqttBinary::MAX_LENGTH`].
-    ///
-    /// # Invariants
-    ///
-    /// The length of the slice parameter in bytes is less than or equal to
-    /// [`MqttBinary::MAX_LENGTH`].
-    ///
-    /// # Panics
-    ///
-    /// In debug builds, this function will panic if the bytes' length is greater than
-    /// [`MqttBinary::MAX_LENGTH`].
-    #[must_use]
-    pub const fn from_bytes_unchecked(bytes: Bytes<'b>) -> Self {
-        const_debug_assert!(
-            bytes.len() <= Self::MAX_LENGTH,
-            "the slice's length exceeds MAX_LENGTH"
-        );
-
-        Self(bytes)
-    }
-
-    /// Converts a slice into [`MqttBinary`] without checking for the max length of
+    /// Converts a `B` into [`MqttBinary`] without checking for the max length of
     /// [`MqttBinary::MAX_LENGTH`].
     ///
     /// # Invariants
@@ -168,40 +145,42 @@ impl<'b> MqttBinary<'b> {
     /// In debug builds, this function will panic if the slice's length is greater than
     /// [`MqttBinary::MAX_LENGTH`].
     #[must_use]
-    pub const fn from_slice_unchecked(slice: &'b [u8]) -> Self {
+    pub fn new_unchecked(b: impl Into<Bytes<'b, B>>) -> Self {
+        let bytes = b.into();
+
         const_debug_assert!(
-            slice.len() <= Self::MAX_LENGTH,
-            "the slice's length exceeds MAX_LENGTH"
+            bytes.len() <= Self::MAX_LENGTH,
+            "the bytes' length exceeds MAX_LENGTH"
         );
 
-        Self(Bytes::Borrowed(slice))
+        Self(bytes)
     }
 
     /// Returns the length of the underlying data.
     #[inline]
     #[must_use]
-    pub const fn len(&self) -> u16 {
+    pub fn len(&self) -> u16 {
         self.0.len() as u16
     }
 
     /// Returns whether the underlying data is empty.
     #[inline]
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the underlying bytes as `&[u8]`
     #[inline]
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 
     /// Delegates to [`Bytes::as_borrowed`].
     #[inline]
     #[must_use]
-    pub const fn as_borrowed(&'b self) -> Self {
-        Self(self.0.as_borrowed())
+    pub fn as_borrowed(&'b self) -> MqttBinary<'b> {
+        MqttBinary(self.0.as_borrowed())
     }
 }

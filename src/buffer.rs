@@ -8,6 +8,8 @@ pub use bump::{BumpBuffer, InsufficientSpace};
 
 use crate::bytes::Bytes;
 
+pub trait BufferProviderSuper<'a> {}
+
 /// A trait to describe anything that can allocate memory.
 ///
 /// Returned memory can be borrowed or owned. Either way, it is bound by the `'a`
@@ -18,7 +20,8 @@ pub trait BufferProvider<'a> {
     /// The type returned from a successful buffer provision.
     /// Must implement [`AsMut`] so that it can be borrowed mutably right after allocation for
     /// initialization and [`Into`] for storing as [`Bytes`].
-    type Buffer: AsMut<[u8]> + Into<Bytes<'a>>;
+    type Inner: AsRef<[u8]>;
+    type Buffer: AsMut<[u8]> + Into<Bytes<'a, Self::Inner>>;
 
     /// The error type returned from a failed buffer provision.
     #[cfg(not(feature = "defmt"))]
@@ -265,6 +268,7 @@ mod alloc {
     pub struct AllocBuffer;
 
     impl<'a> BufferProvider<'a> for AllocBuffer {
+        type Inner = Box<[u8]>;
         type Buffer = Box<[u8]>;
         type ProvisionError = Infallible;
 

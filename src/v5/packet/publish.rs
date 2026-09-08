@@ -240,7 +240,7 @@ impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize
         self.topic
             .topic_name()
             .map(TopicName::as_borrowed)
-            .map_or(Self::EMPTY_TOPIC, Into::into)
+            .map_or(MqttString::<&[u8]>::from_str_unchecked(""), Into::into)
             .write(write)
             .await?;
 
@@ -262,7 +262,7 @@ impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize
         // Don't write subscription identifiers as they are irrational when publishing from client to server
         self.content_type.write(write).await?;
 
-        self.message.write(write).await?;
+        self.message.as_bytes().write(write).await?;
 
         Ok(())
     }
@@ -272,7 +272,7 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
     PublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
     // Invariant: Empty string does not exceed MqttString::MAX_LENGTH
-    const EMPTY_TOPIC: MqttString<'static> = MqttString::from_str_unchecked("");
+    // const EMPTY_TOPIC: MqttString<'static> = MqttString::<&[u8]>::from_str_unchecked("");
 
     /// Creates a new packet with Quality of Service 0
     #[allow(clippy::too_many_arguments)]
@@ -312,7 +312,7 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
             .topic
             .topic_name()
             .map(TopicName::as_borrowed)
-            .map_or(Self::EMPTY_TOPIC, Into::into)
+            .map_or(MqttString::<&[u8]>::from_str_unchecked(""), Into::into)
             .written_len();
 
         let variable_header_length = topic_name_length
@@ -675,7 +675,9 @@ mod unit {
             Some(false.into()),
             Some(481123u32.into()),
             Some(TopicName::new(MqttString::from_str("uno, dos, tres, catorce").unwrap()).unwrap()),
-            Some(MqttBinary::from_slice_unchecked(&[0, 1, 2, 3, 4, 5, 6, 7])),
+            Some(MqttBinary::new_unchecked(
+                [0, 1, 2, 3, 4, 5, 6, 7].as_slice(),
+            )),
             [
                 UserProperty(MqttStringPair::new(
                     MqttString::from_str("donald").unwrap(),

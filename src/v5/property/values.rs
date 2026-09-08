@@ -21,7 +21,7 @@ use crate::{
 /// * Implements [`Readable`]: Only content is read. In the case of the newtype having a lifetime
 ///   `'a`, the [`Readable`] implementation is trait bounded by [`Store<'a>`]
 macro_rules! property {
-    ($name:ident, $ty:ty) => {
+    ($name:ident, $ty:ident) => {
         #[derive(Debug, PartialEq, Clone, Copy)]
         #[cfg_attr(feature = "defmt", derive(defmt::Format))]
         pub struct $name(pub(crate) $ty);
@@ -60,28 +60,28 @@ macro_rules! property {
             }
         }
     };
-    ($name:ident < $lt:lifetime >, $ty:ty) => {
-        #[derive(Debug, PartialEq, Clone)]
+    ($name:ident < $lt:lifetime >, $ty:ident) => {
+        #[derive(Clone)]
         #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-        pub struct $name<$lt>(pub(crate) $ty);
+        pub struct $name<$lt, I>(pub(crate) $ty<$lt, I>);
 
-        impl<$lt> Property for $name<$lt> {
+        impl<$lt, I> Property for $name<$lt, I> {
             const TYPE: PropertyType = PropertyType::$name;
-            type Inner = $ty;
+            type Inner = $ty<$lt, I>;
 
             fn into_inner(self) -> Self::Inner {
                 self.0
             }
         }
 
-        impl<$lt, R: Read + Store<$lt>> Readable<R> for $name<$lt> {
+        impl<$lt, R: Read + Store<$lt>> Readable<R> for $name<$lt, R::Buffer> {
             async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
-                let content = <$ty as Readable<R>>::read(read).await?;
+                let content = <$ty<$lt, R::Buffer> as Readable<R>>::read(read).await?;
                 Ok(Self(content))
             }
         }
 
-        impl<$lt> Writable for $name<$lt> {
+        impl<$lt, I: AsRef<[u8]>> Writable for $name<$lt, I> {
             fn written_len(&self) -> usize {
                 Self::TYPE.written_len() + self.0.written_len()
             }
@@ -93,8 +93,8 @@ macro_rules! property {
             }
         }
 
-        impl<$lt> From<$ty> for $name<$lt> {
-            fn from(value: $ty) -> Self {
+        impl<$lt, I> From<$ty<$lt, I>> for $name<$lt, I> {
+            fn from(value: $ty<$lt, I>) -> Self {
                 Self(value)
             }
         }
@@ -103,34 +103,36 @@ macro_rules! property {
 
 property!(PayloadFormatIndicator, bool);
 property!(MessageExpiryInterval, u32);
-property!(ContentType<'c>, MqttString<'c>);
-property!(ResponseTopic<'c>, TopicName<'c>);
-property!(CorrelationData<'c>, MqttBinary<'c>);
+property!(ContentType<'c>, MqttString);
+property!(ResponseTopic<'c>, TopicName);
+property!(CorrelationData<'c>, MqttBinary);
 property!(SubscriptionIdentifier, VarByteInt);
-property!(AssignedClientIdentifier<'c>, MqttString<'c>);
+property!(AssignedClientIdentifier<'c>, MqttString);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ServerKeepAlive(pub(crate) KeepAlive);
-property!(AuthenticationMethod<'c>, MqttString<'c>);
-property!(AuthenticationData<'c>, MqttBinary<'c>);
+property!(AuthenticationMethod<'c>, MqttString);
+property!(AuthenticationData<'c>, MqttBinary);
 property!(RequestProblemInformation, bool);
 property!(WillDelayInterval, u32);
 property!(RequestResponseInformation, bool);
-property!(ResponseInformation<'c>, MqttString<'c>);
-property!(ServerReference<'c>, MqttString<'c>);
-property!(ReasonString<'c>, MqttString<'c>);
+property!(ResponseInformation<'c>, MqttString);
+property!(ServerReference<'c>, MqttString);
+property!(ReasonString<'c>, MqttString);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ReceiveMaximum(pub(crate) NonZero<u16>);
 property!(TopicAliasMaximum, u16);
-property!(TopicAlias, NonZero<u16>);
+#[derive(Debug,PartialEq,Clone,Copy)]
+#[cfg_attr(feature = "defmt",derive(defmt::Format))]
+pub struct TopicAlias(pub(crate)NonZero<u16>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct MaximumQoS(pub(crate) QoS);
 property!(RetainAvailable, bool);
-property!(UserProperty<'c>, MqttStringPair<'c>);
+property!(UserProperty<'c>, MqttStringPair);
 
-impl UserProperty<'_> {
+impl<I> UserProperty<'_, I> {
     pub async fn skip<'b, R: Read, B: BufferProvider<'b>>(
         read: &mut BodyReader<'_, 'b, R, B>,
     ) -> Result<usize, RxError<R::Error, B::ProvisionError>> {
@@ -147,6 +149,36 @@ impl UserProperty<'_> {
 property!(WildcardSubscriptionAvailable, bool);
 property!(SubscriptionIdentifierAvailable, bool);
 property!(SharedSubscriptionAvailable, bool);
+
+
+impl Property for TopicAlias {
+    const TYPE: PropertyType = PropertyType::TopicAlias;
+    type Inner = NonZero<u16> ;
+    fn into_inner(self) -> Self::Inner {
+        self.0
+    }
+}
+impl <R: Read>Readable<R>for TopicAlias {
+    async fn read(read: &mut R) -> Result<Self,ReadError<R::Error>>{
+        let content =  <NonZero<u16>as Readable<R>>::read(read).await?;
+        Ok(Self(content))
+    }
+}
+impl Writable for TopicAlias {
+    fn written_len(&self) -> usize {
+        Self::TYPE.written_len()+self.0.written_len()
+    }
+    async fn write<W: Write>(&self,write: &mut W) -> Result<(),WriteError<W::Error>>{
+        Self::TYPE.write(write).await?;
+        self.0.write(write).await?;
+        Ok(())
+    }
+}
+impl From<NonZero<u16> >for TopicAlias {
+    fn from(value: NonZero<u16>) -> Self {
+        Self(value)
+    }
+}
 
 impl Property for ServerKeepAlive {
     const TYPE: PropertyType = PropertyType::ServerKeepAlive;

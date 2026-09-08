@@ -189,11 +189,11 @@ impl<'p> Options<'p> {
 /// duration of a single network connection and not necessarily until the session end.
 ///
 /// Topic aliases must not be 0
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum TopicReference<'t> {
+pub enum TopicReference<'t, T = &'t [u8]> {
     /// Publish to the inner topic name without creating an alias.
-    Name(TopicName<'t>),
+    Name(TopicName<'t, T>),
 
     /// Publish to an already mapped topic alias. The alias must have been defined earlier
     /// in the network connection.
@@ -201,10 +201,44 @@ pub enum TopicReference<'t> {
 
     /// Create a new topic alias or replace an existing topic alias.
     /// The alias lasts until the end of the network connection.
-    Mapping(TopicName<'t>, NonZero<u16>),
+    Mapping(TopicName<'t, T>, NonZero<u16>),
 }
 
-impl<'t> TopicReference<'t> {
+impl<'t, T: AsRef<[u8]>> core::fmt::Debug for TopicReference<'t, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Name(arg0) => f.debug_tuple("Name").field(arg0).finish(),
+            Self::Alias(arg0) => f.debug_tuple("Alias").field(arg0).finish(),
+            Self::Mapping(arg0, arg1) => f.debug_tuple("Mapping").field(arg0).field(arg1).finish(),
+        }
+    }
+}
+#[cfg(feature = "defmt")]
+impl<'a, T: AsRef<[u8]>> defmt::Format for TopicReference<'a, T> {
+    fn format(&self, fmt: defmt::Formatter) {
+        match self {
+            Self::Name(arg0) => defmt::write!(fmt, "Name({:?})", arg0.as_ref()),
+            Self::Alias(arg0) => defmt::write!(fmt, "Alias({:?})", arg0.as_ref()),
+            Self::Mapping(arg0, arg1) => {
+                defmt::write!(fmt, "Mapping({:?}, {:?})", arg0.as_ref(), arg1.as_ref())
+            }
+        }
+    }
+}
+
+impl<'t, T: AsRef<[u8]>> PartialEq for TopicReference<'t, T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Name(l0), Self::Name(r0)) => l0 == r0,
+            (Self::Alias(l0), Self::Alias(r0)) => l0 == r0,
+            (Self::Mapping(l0, l1), Self::Mapping(r0, r1)) => l0 == r0 && l1 == r1,
+            _ => false,
+        }
+    }
+}
+impl<'t, T: AsRef<[u8]>> Eq for TopicReference<'t, T> {}
+
+impl<'t, T> TopicReference<'t, T> {
     pub(crate) fn alias(&self) -> Option<NonZero<u16>> {
         match self {
             Self::Name(_) => None,
@@ -212,23 +246,27 @@ impl<'t> TopicReference<'t> {
             Self::Mapping(_, alias) => Some(*alias),
         }
     }
-    pub(crate) fn topic_name(&self) -> Option<&TopicName<'t>> {
+    pub(crate) fn topic_name(&self) -> Option<&TopicName<'t, T>> {
         match self {
             Self::Name(topic_name) => Some(topic_name),
             Self::Alias(_) => None,
             Self::Mapping(topic_name, _) => Some(topic_name),
         }
     }
+}
 
+impl<'t, T: AsRef<[u8]>> TopicReference<'t, T> {
     /// Delegates to [`Bytes::as_borrowed`].
     ///
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[must_use]
-    pub fn as_borrowed(&'t self) -> Self {
+    pub fn as_borrowed(&'t self) -> TopicReference<'t> {
         match self {
-            Self::Name(topic_name) => Self::Name(topic_name.as_borrowed()),
-            Self::Alias(alias) => Self::Alias(*alias),
-            Self::Mapping(topic_name, alias) => Self::Mapping(topic_name.as_borrowed(), *alias),
+            Self::Name(topic_name) => TopicReference::Name(topic_name.as_borrowed()),
+            Self::Alias(alias) => TopicReference::Alias(*alias),
+            Self::Mapping(topic_name, alias) => {
+                TopicReference::Mapping(topic_name.as_borrowed(), *alias)
+            }
         }
     }
 }

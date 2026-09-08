@@ -2,8 +2,6 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::str::{Utf8Error, from_utf8, from_utf8_unchecked};
 
-use const_fn::const_fn;
-
 use crate::{
     fmt::const_debug_assert,
     types::{MqttBinary, TooLargeToEncode},
@@ -96,26 +94,39 @@ impl From<TooLargeToEncode> for MqttStringError {
 ///
 /// # Ok::<(), MqttStringError>(())
 /// ```
-#[derive(Default, Clone, PartialEq, Eq)]
-pub struct MqttString<'s>(pub(crate) MqttBinary<'s>);
+#[derive(Clone)]
+pub struct MqttString<'s, B = &'s [u8]>(pub(crate) MqttBinary<'s, B>);
 
-impl core::fmt::Debug for MqttString<'_> {
+impl<'s, B: AsRef<[u8]>> PartialEq for MqttString<'s, B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<'s, B: AsRef<[u8]>> Eq for MqttString<'s, B> {}
+
+impl<'s> Default for MqttString<'s> {
+    fn default() -> Self {
+        Self(MqttBinary::default())
+    }
+}
+
+impl<B: AsRef<[u8]>> core::fmt::Debug for MqttString<'_, B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("MqttString").field(&self.as_ref()).finish()
     }
 }
 
 #[cfg(feature = "defmt")]
-impl<'a> defmt::Format for MqttString<'a> {
+impl<'a, B: AsRef<[u8]>> defmt::Format for MqttString<'a, B> {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "MqttString({:?})", self.as_ref());
     }
 }
 
-impl<'s> TryFrom<MqttBinary<'s>> for MqttString<'s> {
+impl<'s, B: AsRef<[u8]>> TryFrom<MqttBinary<'s, B>> for MqttString<'s, B> {
     type Error = MqttStringError;
 
-    fn try_from(value: MqttBinary<'s>) -> Result<Self, Self::Error> {
+    fn try_from(value: MqttBinary<'s, B>) -> Result<Self, Self::Error> {
         Self::from_utf8_binary(value)
     }
 }
@@ -127,7 +138,7 @@ impl<'s> TryFrom<&'s str> for MqttString<'s> {
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<String> for MqttString<'_> {
+impl TryFrom<String> for MqttString<'static, Box<[u8]>> {
     type Error = MqttStringError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -143,7 +154,7 @@ impl TryFrom<String> for MqttString<'_> {
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<Vec<u8>> for MqttString<'_> {
+impl TryFrom<Vec<u8>> for MqttString<'static, Box<[u8]>> {
     type Error = MqttStringError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -153,7 +164,7 @@ impl TryFrom<Vec<u8>> for MqttString<'_> {
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<Box<str>> for MqttString<'_> {
+impl TryFrom<Box<str>> for MqttString<'static, Box<[u8]>> {
     type Error = MqttStringError;
 
     fn try_from(value: Box<str>) -> Result<Self, Self::Error> {
@@ -161,7 +172,7 @@ impl TryFrom<Box<str>> for MqttString<'_> {
     }
 }
 #[cfg(feature = "alloc")]
-impl TryFrom<Box<[u8]>> for MqttString<'_> {
+impl TryFrom<Box<[u8]>> for MqttString<'static, Box<[u8]>> {
     type Error = MqttStringError;
 
     fn try_from(value: Box<[u8]>) -> Result<Self, Self::Error> {
@@ -169,17 +180,17 @@ impl TryFrom<Box<[u8]>> for MqttString<'_> {
     }
 }
 
-impl AsRef<str> for MqttString<'_> {
+impl<B: AsRef<[u8]>> AsRef<str> for MqttString<'_, B> {
     fn as_ref(&self) -> &str {
         // Safety: MqttString contains valid UTF-8
         unsafe { from_utf8_unchecked(self.0.as_ref()) }
     }
 }
 
-impl<'s> MqttString<'s> {
+impl<'s, B: AsRef<[u8]>> MqttString<'s, B> {
     /// The maximum length of a string in bytes so that it can be encoded.
     /// This value is limited by the 2-byte length field.
-    pub const MAX_LENGTH: usize = MqttBinary::MAX_LENGTH;
+    pub const MAX_LENGTH: usize = MqttBinary::<&[u8]>::MAX_LENGTH;
 
     /// Converts [`MqttBinary`] into [`MqttString`] by checking for null characters and valid UTF-8.
     /// Valid length is guaranteed by [`MqttBinary`]'s invariant.
@@ -189,8 +200,7 @@ impl<'s> MqttString<'s> {
     /// * [`MqttStringError::Utf8Error`] if `b` is not valid UTF-8.
     /// * [`MqttStringError::NullCharacter`] if `b` contains an ASCII `\0` character.
     /// * [`MqttStringError::TooLargeToEncode`] if `b`'s length exceeds [`MqttString::MAX_LENGTH`].
-    #[const_fn(cfg(not(feature = "alloc")))]
-    pub const fn from_utf8_binary(b: MqttBinary<'s>) -> Result<Self, MqttStringError> {
+    pub fn from_utf8_binary(b: MqttBinary<'s, B>) -> Result<MqttString<'s, B>, MqttStringError> {
         let mut i = 0;
         while i < b.as_bytes().len() {
             if b.as_bytes()[i] == 0 {
@@ -221,7 +231,7 @@ impl<'s> MqttString<'s> {
     /// In debug builds, this function will panic if the binary contains a null character or is not
     /// valid UTF-8.
     #[must_use]
-    pub const unsafe fn from_utf8_binary_unchecked(b: MqttBinary<'s>) -> Self {
+    pub unsafe fn from_utf8_binary_unchecked(b: MqttBinary<'s, B>) -> Self {
         if cfg!(debug_assertions) {
             let mut i = 0;
             while i < b.as_bytes().len() {
@@ -241,7 +251,7 @@ impl<'s> MqttString<'s> {
     ///
     /// * [`MqttStringError::NullCharacter`] if `s` contains an ASCII `\0` character.
     /// * [`MqttStringError::TooLargeToEncode`] if `s`' length exceeds [`MqttString::MAX_LENGTH`].
-    pub const fn from_str(s: &'s str) -> Result<Self, MqttStringError> {
+    pub fn from_str(s: &'s str) -> Result<MqttString<'s>, MqttStringError> {
         let mut i = 0;
         while i < s.len() {
             if s.as_bytes()[i] == 0 {
@@ -251,7 +261,7 @@ impl<'s> MqttString<'s> {
         }
 
         match s.len() {
-            ..=Self::MAX_LENGTH => Ok(Self(MqttBinary::from_slice_unchecked(s.as_bytes()))),
+            ..=Self::MAX_LENGTH => Ok(MqttString(MqttBinary::new_unchecked(s.as_bytes()))),
             _ => Err(MqttStringError::TooLargeToEncode),
         }
     }
@@ -269,7 +279,7 @@ impl<'s> MqttString<'s> {
     /// In debug builds, this function will panic if the slice contains a null character or its length is greater
     /// than [`MqttString::MAX_LENGTH`].
     #[must_use]
-    pub const fn from_str_unchecked(s: &'s str) -> Self {
+    pub fn from_str_unchecked(s: &'s str) -> MqttString<'s> {
         if cfg!(debug_assertions) {
             let mut i = 0;
             while i < s.len() {
@@ -278,27 +288,27 @@ impl<'s> MqttString<'s> {
             }
         }
 
-        Self(MqttBinary::from_slice_unchecked(s.as_bytes()))
+        MqttString(MqttBinary::new_unchecked(s.as_bytes()))
     }
 
     /// Returns the length of the underlying data in bytes.
     #[inline]
     #[must_use]
-    pub const fn len(&self) -> u16 {
+    pub fn len(&self) -> u16 {
         self.0.len()
     }
 
     /// Returns whether the underlying data is empty.
     #[inline]
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the underlying string as `&str`
     #[inline]
     #[must_use]
-    pub const fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         // Safety: MqttString contains valid UTF-8
         unsafe { from_utf8_unchecked(self.0.as_bytes()) }
     }
@@ -308,22 +318,31 @@ impl<'s> MqttString<'s> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub const fn as_borrowed(&'s self) -> Self {
-        Self(self.0.as_borrowed())
+    pub fn as_borrowed(&'s self) -> MqttString<'s> {
+        MqttString(self.0.as_borrowed())
     }
 }
 
 /// A name-value pair of two [`MqttString`]'s.
-#[derive(Default, Clone, PartialEq, Eq)]
-pub struct MqttStringPair<'s> {
+#[derive(Clone)]
+pub struct MqttStringPair<'s, S = &'s [u8]> {
     /// The name part of the string pair.
-    pub name: MqttString<'s>,
+    pub name: MqttString<'s, S>,
 
     /// The value part of the string pair.
-    pub value: MqttString<'s>,
+    pub value: MqttString<'s, S>,
 }
 
-impl<'s> core::fmt::Debug for MqttStringPair<'s> {
+// TODO Default impl for B = &[u8]
+
+impl<'s, S: AsRef<[u8]>> PartialEq for MqttStringPair<'s, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.value == other.value
+    }
+}
+impl<'s, S: AsRef<[u8]>> Eq for MqttStringPair<'s, S> {}
+
+impl<'s, S: AsRef<[u8]>> core::fmt::Debug for MqttStringPair<'s, S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MqttStringPair")
             .field("name", &self.name.as_str())
@@ -333,7 +352,7 @@ impl<'s> core::fmt::Debug for MqttStringPair<'s> {
 }
 
 #[cfg(feature = "defmt")]
-impl<'a> defmt::Format for MqttStringPair<'a> {
+impl<'s, S: AsRef<[u8]>> defmt::Format for MqttStringPair<'s, S> {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(
             fmt,
@@ -344,10 +363,10 @@ impl<'a> defmt::Format for MqttStringPair<'a> {
     }
 }
 
-impl<'s> MqttStringPair<'s> {
+impl<'s, B: AsRef<[u8]>> MqttStringPair<'s, B> {
     /// Creates a new [`MqttStringPair`]
     #[must_use]
-    pub const fn new(name: MqttString<'s>, value: MqttString<'s>) -> Self {
+    pub const fn new(name: MqttString<'s, B>, value: MqttString<'s, B>) -> Self {
         Self { name, value }
     }
 
@@ -356,10 +375,7 @@ impl<'s> MqttStringPair<'s> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub const fn as_borrowed(&'s self) -> Self {
-        Self {
-            name: self.name.as_borrowed(),
-            value: self.value.as_borrowed(),
-        }
+    pub fn as_borrowed(&'s self) -> MqttStringPair<'s> {
+        MqttStringPair::new(self.name.as_borrowed(), self.value.as_borrowed())
     }
 }

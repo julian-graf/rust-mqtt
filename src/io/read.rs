@@ -14,7 +14,12 @@ pub trait Readable<R: Read>: Sized {
 }
 
 pub trait Store<'a>: Read {
-    async fn read_and_store(&mut self, len: usize) -> Result<Bytes<'a>, ReadError<Self::Error>>;
+    type Buffer: AsRef<[u8]>;
+
+    async fn read_and_store(
+        &mut self,
+        len: usize,
+    ) -> Result<Bytes<'a, Self::Buffer>, ReadError<Self::Error>>;
 }
 
 impl<R: Read, const N: usize> Readable<R> for [u8; N] {
@@ -95,7 +100,7 @@ impl<R: Read> Readable<R> for VarByteInt {
         }
     }
 }
-impl<'b, R: Read + Store<'b>> Readable<R> for MqttBinary<'b> {
+impl<'b, R: Read + Store<'b>> Readable<R> for MqttBinary<'b, R::Buffer> {
     async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
         let len = u16::read(read).await? as usize;
 
@@ -104,7 +109,7 @@ impl<'b, R: Read + Store<'b>> Readable<R> for MqttBinary<'b> {
         Ok(MqttBinary(read.read_and_store(len).await?))
     }
 }
-impl<'s, R: Read + Store<'s>> Readable<R> for MqttString<'s> {
+impl<'s, R: Read + Store<'s>> Readable<R> for MqttString<'s, R::Buffer> {
     async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
         MqttBinary::read(read)
             .await?
@@ -112,7 +117,7 @@ impl<'s, R: Read + Store<'s>> Readable<R> for MqttString<'s> {
             .map_err(|_| ReadError::MalformedPacket)
     }
 }
-impl<'s, R: Read + Store<'s>> Readable<R> for MqttStringPair<'s> {
+impl<'s, R: Read + Store<'s>> Readable<R> for MqttStringPair<'s, R::Buffer> {
     async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
         let name = MqttString::read(read).await?;
         let value = MqttString::read(read).await?;
@@ -120,7 +125,7 @@ impl<'s, R: Read + Store<'s>> Readable<R> for MqttStringPair<'s> {
         Ok(MqttStringPair::new(name, value))
     }
 }
-impl<'s, R: Read + Store<'s>> Readable<R> for TopicName<'s> {
+impl<'s, R: Read + Store<'s>> Readable<R> for TopicName<'s, R::Buffer> {
     async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
         let str = MqttString::read(read).await?;
 
@@ -151,7 +156,12 @@ impl<'b, R: Read, B: BufferProvider<'b>> Read for BodyReader<'_, 'b, R, B> {
     }
 }
 impl<'b, R: Read, B: BufferProvider<'b>> Store<'b> for BodyReader<'_, 'b, R, B> {
-    async fn read_and_store(&mut self, len: usize) -> Result<Bytes<'b>, ReadError<Self::Error>> {
+    type Buffer = B::Inner;
+
+    async fn read_and_store(
+        &mut self,
+        len: usize,
+    ) -> Result<Bytes<'b, Self::Buffer>, ReadError<Self::Error>> {
         if self.remaining_len < len {
             return Err(ReadError::Read(BodyReadError::InsufficientRemainingLen));
         }

@@ -114,7 +114,7 @@ impl Writable for VarByteInt {
         }
     }
 }
-impl Writable for MqttBinary<'_> {
+impl<B: AsRef<[u8]>> Writable for MqttBinary<'_, B> {
     fn written_len(&self) -> usize {
         self.0.len() + wlen!(u16)
     }
@@ -123,12 +123,12 @@ impl Writable for MqttBinary<'_> {
         let len = self.len();
         len.write(write).await?;
 
-        self.0.write(write).await?;
+        self.0.as_ref().write(write).await?;
 
         Ok(())
     }
 }
-impl Writable for MqttString<'_> {
+impl<B: AsRef<[u8]>> Writable for MqttString<'_, B> {
     fn written_len(&self) -> usize {
         self.0.written_len()
     }
@@ -137,7 +137,7 @@ impl Writable for MqttString<'_> {
         self.0.write(write).await
     }
 }
-impl Writable for MqttStringPair<'_> {
+impl<S: AsRef<[u8]>> Writable for MqttStringPair<'_, S> {
     fn written_len(&self) -> usize {
         self.name.written_len() + self.value.written_len()
     }
@@ -147,7 +147,7 @@ impl Writable for MqttStringPair<'_> {
         self.value.write(write).await
     }
 }
-impl Writable for TopicName<'_> {
+impl<S: AsRef<[u8]>> Writable for TopicName<'_, S> {
     fn written_len(&self) -> usize {
         self.as_ref().written_len()
     }
@@ -156,7 +156,7 @@ impl Writable for TopicName<'_> {
         self.as_ref().write(write).await
     }
 }
-impl Writable for TopicFilter<'_> {
+impl<S: AsRef<[u8]>> Writable for TopicFilter<'_, S> {
     fn written_len(&self) -> usize {
         self.as_ref().written_len()
     }
