@@ -12,6 +12,8 @@ use crate::{
     v5::{packet::GenericPubackPacket, property::Property},
 };
 
+pub use partial::{PartialPublish, PartialPublishEvent};
+
 /// Contains information taken from a connection handshake which the client does not have to
 /// store for correct operational behaviour.
 ///
@@ -385,4 +387,123 @@ pub struct Auth<'a, const MAX_USER_PROPERTIES: usize> {
     /// The user property entries in the AUTH packet.
     /// If the vector is full, this list might not be exhaustive.
     pub user_properties: Vec<MqttStringPair<'a>, MAX_USER_PROPERTIES>,
+}
+
+mod partial {
+    use heapless::Vec;
+
+    use crate::types::{
+        IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, TopicName, VarByteInt,
+    };
+
+    /// Events emitted by the client when receiving a partial PUBLISH packet.
+    #[derive(Debug)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    pub enum PartialPublishEvent<
+        'e,
+        const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+        const MAX_USER_PROPERTIES: usize,
+    > {
+        /// The server sent a PUBLISH packet. In the case of [`QoS::AtLeastOnce`], this can be
+        /// a duplicate packet as indicated by the `DUP` flag, however, this flag being set
+        /// does not rule out the possibility of this packet being the first one to deliver
+        /// the application message. In the case of [`QoS::ExactlyOnce`], this packet and event
+        /// is definitely the first one to deliver the application message despite the setting
+        /// of the `DUP` flag, any other instances of the same application message will surface
+        /// as [`Event::Duplicate`].
+        ///
+        /// The client has responded as follows:
+        /// - [`QoS::AtMostOnce`]: No action
+        /// - [`QoS::AtLeastOnce`]: No action, the PUBACK must be sent manually by the user with [`Client::manual_acknowledge`].
+        /// - [`QoS::ExactlyOnce`]: No action, the PUBREC must be sent manually by the user with [`Client::manual_receive`].
+        ///
+        /// [`QoS::AtMostOnce`]: crate::types::QoS::AtMostOnce
+        /// [`QoS::AtLeastOnce`]: crate::types::QoS::AtLeastOnce
+        /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
+        /// [`Client::manual_acknowledge`]: crate::client::Client::manual_acknowledge
+        /// [`Client::manual_receive`]: crate::client::Client::manual_receive
+        Publish(PartialPublish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+
+        /// The server sent a [`QoS::ExactlyOnce`] PUBLISH packet which would cause a duplicate.
+        /// The [`AckMode`] of the original PUBLISH packet for this packet identifier is unchanged,
+        /// which is also the value set for the included [`Publish::ack_mode`] instead of the value
+        /// produced by the predicate optionally set with [`Client::ack_manually_when`]. The client
+        /// response behaviour depends on the original [`AckMode`] value (the one in this
+        /// [`Publish::ack_mode`]):
+        /// - [`AckMode::Automatic`]: The client has responded automatically.
+        /// - [`AckMode::Manual`]:
+        ///   - The client has responded automatically in all cases where a PUBREC was previously
+        ///     sent within the same network connection.
+        ///   - If a reconnection occured and this duplicate is the first republish, the PUBREC
+        ///     packet must still be sent manually.
+        ///
+        /// Because the message was deserialized already anyway, it is included here, however, it
+        /// is **NOT** a valid application message and **MUST** be treated like it wasn't ever
+        /// delivered by the client.
+        ///
+        /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
+        /// [`Client::ack_manually_when`]: crate::client::Client::ack_manually_when
+        Duplicate(PartialPublish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+    }
+
+    /// Content of [`PartialPublishEvent::Publish`] or [`PartialPublishEvent::Duplicate`]. In the latter
+    /// case, it is **NOT** a valid application message and **MUST** be treated like it wasn't ever delivered
+    /// by the client.
+    #[derive(Debug)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    pub struct PartialPublish<
+        'p,
+        const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+        const MAX_USER_PROPERTIES: usize,
+    > {
+        /// The DUP flag in the PUBLISH packet. If set to false, it indicates that this is the first occasion
+        /// the server has attempted to send this publication.
+        pub dup: bool,
+
+        /// The quality of service the server determined to use for this publication. It is the minimum of
+        /// the matching subscription with the highest quality of service level and the quality of service of
+        /// the publishing client's publication.
+        ///
+        /// If the quality of service is greater than 0, this includes the non-zero packet identifier of the
+        /// PUBLISH packet.
+        pub identified_qos: IdentifiedQoS,
+
+        /// The retain flag in the PUBLISH packet. If set to true, it indicates that the publication is the
+        /// result of a retained message. If set to false, this publication having been retained depends on
+        /// the retain as published flag of the matching subscription.
+        pub retain: bool,
+
+        /// The exact topic of this publication.
+        pub topic: TopicName<'p>,
+
+        /// If present, indicates whether the payload is UTF-8. This value is set by the publisher and is
+        /// NOT verified by the client library.
+        /// This is equal to the payload format indicator property of the PUBLISH packet.
+        pub payload_format_indicator: Option<bool>,
+
+        /// The message expiry interval in seconds.
+        /// This is calculated by subtracting the elapsed time since the publish from the message expiry
+        /// interval in original publication.
+        pub message_expiry_interval: Option<u32>,
+
+        /// Identifies an incoming publication as a request and specifies the topic which the response should
+        /// be published on.
+        pub response_topic: Option<TopicName<'p>>,
+
+        /// Present in incoming requests and responses. In either case this is arbitrary binary data used for
+        /// associating either the following response with this specific request or in case of a response,
+        /// link back to the original request.
+        pub correlation_data: Option<MqttBinary<'p>>,
+
+        /// The user property entries in the PUBLISH packet. If the vector is full, this list might not be
+        /// exhaustive.
+        pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
+
+        /// The subscription identifiers in the PUBLISH packet. If the vector is full, this list might not
+        /// be exhaustive.
+        pub subscription_identifiers: Vec<VarByteInt, MAX_SUBSCRIPTION_IDENTIFIERS>,
+
+        /// The content type property of the PUBLISH packet
+        pub content_type: Option<MqttString<'p>>,
+    }
 }

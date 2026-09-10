@@ -1,21 +1,25 @@
 //! Implements full client functionality with session and configuration handling and Quality of Service flows.
 
-use core::{matches, num::NonZero};
+use core::{convert::Infallible, matches, num::NonZero};
 
 use crate::{
     auth::{AuthMechanism, AuthOptions, ReAuthState},
     buffer::BufferProvider,
     bytes::Bytes,
     client::{
-        event::{Auth, Connected, Event, Puback, Publish, Pubrej, Suback},
+        event::{
+            Auth, Connected, Event, PartialPublish, PartialPublishEvent, Puback, Publish, Pubrej,
+            Suback,
+        },
         options::{
             AckMode, AckOptions, ConnectOptions, DisconnectOptions, PublicationOptions,
             ReAuthOptions, SubscriptionOptions, TopicReference, UnsubscriptionOptions,
         },
-        raw::Raw,
+        raw::{Raw, RawError},
+        reader::ApplicationMessageReader,
     },
     config::{ClientConfig, MaximumPacketSize, ServerConfig, SessionExpiryInterval, SharedConfig},
-    fmt::{assert, const_assert, debug, error, info, panic, trace, unreachable, warn},
+    fmt::{assert, assert_eq, const_assert, debug, error, info, panic, trace, unreachable, warn},
     header::{FixedHeader, PacketType},
     io::Transport,
     packet::{Packet, TxPacket},
@@ -26,9 +30,10 @@ use crate::{
     },
     v5::{
         packet::{
-            AuthPacket, ConnackPacket, ConnectPacket, DisconnectPacket, PingreqPacket,
-            PingrespPacket, PubackPacket, PubcompPacket, PublishPacket, PubrecPacket, PubrelPacket,
-            SubackPacket, SubscribePacket, UnsubackPacket, UnsubscribePacket,
+            AuthPacket, ConnackPacket, ConnectPacket, DisconnectPacket, PayloadlessPublishPacket,
+            PingreqPacket, PingrespPacket, PubackPacket, PubcompPacket, PublishPacket,
+            PubrecPacket, PubrelPacket, SubackPacket, SubscribePacket, UnsubackPacket,
+            UnsubscribePacket,
         },
         property::Property,
     },
@@ -39,8 +44,10 @@ mod err;
 pub mod event;
 pub mod options;
 pub mod raw;
+mod reader;
 
 pub use err::Error as MqttError;
+
 pub use raw::AbortError;
 
 /// An MQTT client.
@@ -2200,6 +2207,130 @@ impl<
         }
 
         Ok(header)
+    }
+
+    /// Polls the network for the variable header but not the payload of a PUBLISH packet. Not cancel-safe.
+    /// The complete payload must be read with the [`ApplicationMessageReader`], otherwise its [`Drop`]
+    /// implementation will panic.
+    ///
+    /// # Preconditions:
+    /// - The [`FixedHeader`] argument was received from the network right before.
+    /// - [`FixedHeader::packet_type`] returns `Ok(PacketType::Publish)`
+    /// - The client did not return a non-recoverable [`MqttError`] before
+    ///
+    /// # Returns:
+    /// Events indicating whether the PUBLISH packet is a duplicate or not and a reader for the
+    /// payload of the PUBLISH packet.
+    ///
+    /// # Errors
+    ///
+    /// * [`MqttError::RecoveryRequired`] if an unrecoverable error occured previously
+    /// * [`MqttError::Network`] if the underlying [`Transport`] returned an error
+    /// * [`MqttError::Alloc`] if the underlying [`BufferProvider`] returned an error
+    /// * [`MqttError::Server`] if:
+    ///   * the server sends a malformed packet
+    ///   * the server causes a protocol error
+    ///   * the packet following this header exceeds the client's maximum packet size
+    ///   * the server sends a PUBLISH packet with an invalid topic alias
+    ///   * the server exceeded the client's receive maximum with a new [`QoS::ExactlyOnce`]
+    ///     PUBLISH
+    pub async fn poll_publish_payload<'r>(
+        &'r mut self,
+        header: FixedHeader,
+    ) -> Result<
+        (
+            PartialPublishEvent<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+            ApplicationMessageReader<
+                'a,
+                'c,
+                'r,
+                N,
+                B,
+                SUBSCRIBE_MAXIMUM,
+                RECEIVE_MAXIMUM,
+                SEND_MAXIMUM,
+                MAX_SUBSCRIPTION_IDENTIFIERS,
+                MAX_USER_PROPERTIES,
+            >,
+        ),
+        MqttError<'c, 0>,
+    > {
+        assert_eq!(header.packet_type(), Ok(PublishPacket::<0, 0>::PACKET_TYPE));
+
+        let publish = self
+            .raw
+            .recv_body::<PayloadlessPublishPacket<MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>>(&header)
+            .await?;
+
+        // Our topic alias maximum is always 0, the moment we receive a topic alias, this is an error.
+        let TopicReference::Name(topic) = publish.topic else {
+            error!("received disallowed topic alias");
+            self.raw.prepare_disconnect(ReasonCode::TopicAliasInvalid);
+            return Err(MqttError::Server);
+        };
+
+        let message_len = publish.message_len;
+        let publish = PartialPublish {
+            dup: publish.dup,
+            identified_qos: publish.identified_qos,
+            retain: publish.retain,
+            topic,
+            payload_format_indicator: publish.payload_format_indicator.map(Property::into_inner),
+            message_expiry_interval: publish.message_expiry_interval.map(Property::into_inner),
+            response_topic: publish.response_topic.map(Property::into_inner),
+            correlation_data: publish.correlation_data.map(Property::into_inner),
+            user_properties: publish
+                .user_properties
+                .into_iter()
+                .map(Property::into_inner)
+                .collect(),
+            subscription_identifiers: publish
+                .subscription_identifiers
+                .into_iter()
+                .map(Property::into_inner)
+                .collect(),
+            content_type: publish.content_type.map(Property::into_inner),
+        };
+
+        // For now, only manual acknowledgements since we should probably
+        // receive the packet completely first
+        let ack_mode = AckMode::Manual;
+
+        let (action, event) = self
+            .session
+            .inbound_publish(publish.identified_qos, ack_mode);
+
+        match action {
+            Response::Acknowledge(_)
+            | Response::Receive(_)
+            | Response::Release(_)
+            | Response::Complete(_) => unreachable!(),
+
+            Response::None => {}
+            Response::Disconnect(reason_code) => {
+                error!("invalid PUBLISH packet rejected by state machine");
+                self.raw.prepare_disconnect(reason_code);
+            }
+        }
+
+        let e = match event {
+            SmEvent::Ignored
+            | SmEvent::Aborted
+            | SmEvent::Rejected
+            | SmEvent::Acknowledged
+            | SmEvent::Received(_)
+            | SmEvent::Released(_)
+            | SmEvent::Completed => unreachable!(),
+
+            SmEvent::Publish => PartialPublishEvent::Publish(publish),
+            SmEvent::Duplicate(_) => PartialPublishEvent::Duplicate(publish),
+            SmEvent::ServerError => return Err(MqttError::Server),
+        };
+
+        Ok((e, ApplicationMessageReader::new(self, message_len)))
+    }
+    pub(crate) async fn poll_raw(&mut self, buf: &mut [u8]) -> Result<usize, RawError<Infallible>> {
+        self.raw.recv_raw(buf).await
     }
 
     /// Polls the network for the variable header and payload of a packet. Not cancel-safe.

@@ -4,7 +4,7 @@ mod err;
 mod header;
 mod net;
 
-use core::matches;
+use core::{convert::Infallible, matches};
 
 pub use err::AbortError;
 pub(crate) use err::Error as RawError;
@@ -17,6 +17,7 @@ use crate::fmt::unreachable;
 use crate::{
     buffer::BufferProvider,
     client::raw::{header::HeaderState, net::NetState},
+    eio::Error,
     fmt::{debug, debug_assert, error, warn},
     header::FixedHeader,
     io::{Transport, err::WriteError, read::BodyReader},
@@ -200,6 +201,31 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
         self.n.deactivate();
 
         e
+    }
+
+    pub async fn recv_raw(&mut self, buf: &mut [u8]) -> Result<usize, RawError<Infallible>> {
+        let net = self.n.get().inspect_err(|e| match e {
+            NetStateError::Faulted => {
+                warn!("attempted to receive from a faulted mqtt connection")
+            }
+            NetStateError::Inactive => {
+                warn!("attempted to receive from a faulted mqtt/network connection")
+            }
+            NetStateError::Terminated => {
+                warn!("attempted to receive from a closed network connection")
+            }
+        })?;
+
+        net.read(buf).await.map_err(|e| {
+            // We only have to handle the `Network` branch of `handle_rx`
+            let kind = e.kind();
+
+            error!("I/O error during receive: {:?}", kind);
+
+            self.n.deactivate();
+
+            RawError::Network(kind)
+        })
     }
 
     /// Cancel-safe method to receive the fixed header of a packet

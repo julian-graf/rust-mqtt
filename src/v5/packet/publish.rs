@@ -368,6 +368,232 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
     }
 }
 
+pub mod partial {
+    use heapless::Vec;
+
+    use crate::{
+        buffer::BufferProvider,
+        client::options::TopicReference,
+        eio::Read,
+        fmt::{trace, verbose},
+        header::{FixedHeader, PacketType},
+        io::{
+            read::{BodyReader, Readable},
+            write::Writable,
+        },
+        packet::{Packet, RxError, RxPacket},
+        types::{IdentifiedQoS, MqttString, PacketIdentifier, QoS, TopicName, VarByteInt},
+        v5::property::{
+            AtMostOnceProperty, ContentType, CorrelationData, MessageExpiryInterval,
+            PayloadFormatIndicator, Property, PropertyType, ResponseTopic, SubscriptionIdentifier,
+            TopicAlias, UserProperty,
+        },
+    };
+
+    #[derive(Debug, Clone)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    pub struct PayloadlessPublishPacket<
+        'p,
+        const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+        const MAX_USER_PROPERTIES: usize,
+    > {
+        pub dup: bool,
+        pub identified_qos: IdentifiedQoS,
+        pub retain: bool,
+
+        pub topic: TopicReference<'p>,
+
+        // TODO clarify whether PayloadFormatIndicator can be included only once
+        pub payload_format_indicator: Option<PayloadFormatIndicator>,
+
+        // TODO clarify whether MessageExpiryInterval can be included only once
+        pub message_expiry_interval: Option<MessageExpiryInterval>,
+        pub response_topic: Option<ResponseTopic<'p>>,
+        pub correlation_data: Option<CorrelationData<'p>>,
+        pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        pub subscription_identifiers: Vec<SubscriptionIdentifier, MAX_SUBSCRIPTION_IDENTIFIERS>,
+        pub content_type: Option<ContentType<'p>>,
+        pub message_len: usize,
+    }
+
+    impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> Packet
+        for PayloadlessPublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+    {
+        const PACKET_TYPE: PacketType = PacketType::Publish;
+    }
+
+    impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
+        RxPacket<'p>
+        for PayloadlessPublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+    {
+        async fn receive<R: Read, B: BufferProvider<'p>>(
+            header: &FixedHeader,
+            mut reader: BodyReader<'_, 'p, R, B>,
+        ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
+            trace!("decoding PUBLISH packet");
+
+            let flags = header.flags();
+
+            verbose!("decoding PUBLISH flags");
+            let dup = flags >> 3 == 1;
+            let qos = QoS::try_from_bits((flags >> 1) & 0x03).ok_or(RxError::MalformedPacket)?;
+            let retain = flags & 0x01 == 1;
+
+            let r = &mut reader;
+
+            verbose!("reading topic name field");
+            let topic_name = MqttString::read(r).await?;
+
+            let topic_name = if topic_name.is_empty() {
+                None
+            } else {
+                Some(TopicName::new(topic_name).ok_or(RxError::InvalidTopicName)?)
+            };
+
+            let identified_qos = match qos {
+                QoS::AtMostOnce => IdentifiedQoS::AtMostOnce,
+                QoS::AtLeastOnce => {
+                    verbose!("reading packet identifier field");
+                    IdentifiedQoS::AtLeastOnce(PacketIdentifier::read(r).await?)
+                }
+                QoS::ExactlyOnce => {
+                    verbose!("reading packet identifier field");
+                    IdentifiedQoS::ExactlyOnce(PacketIdentifier::read(r).await?)
+                }
+            };
+
+            verbose!("reading property length field");
+            let mut properties_length = VarByteInt::read(r).await?.size();
+            verbose!("property length: {} bytes", properties_length);
+
+            let mut payload_format_indicator: Option<PayloadFormatIndicator> = None;
+            let mut message_expiry_interval: Option<MessageExpiryInterval> = None;
+            let mut topic_alias: Option<TopicAlias> = None;
+            let mut response_topic: Option<ResponseTopic<'_>> = None;
+            let mut correlation_data: Option<CorrelationData<'_>> = None;
+            let mut user_properties = Vec::new();
+            let mut subscription_identifiers = Vec::new();
+            let mut content_type: Option<ContentType<'_>> = None;
+
+            while properties_length > 0 {
+                verbose!(
+                    "reading property identifier (remaining length: {} bytes)",
+                    r.remaining_len()
+                );
+                let property_type = PropertyType::read(r).await?;
+
+                // unchecked sub because `properties_length` > 0
+                properties_length -= property_type.written_len();
+
+                verbose!(
+                    "reading {:?} property body (remaining length: {} bytes)",
+                    property_type,
+                    r.remaining_len()
+                );
+                match property_type {
+                    PropertyType::PayloadFormatIndicator => {
+                        payload_format_indicator.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(
+                                payload_format_indicator.unwrap().into_inner().written_len(),
+                            )
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::MessageExpiryInterval => {
+                        message_expiry_interval.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(
+                                message_expiry_interval.unwrap().into_inner().written_len(),
+                            )
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::TopicAlias => {
+                        topic_alias.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(topic_alias.unwrap().into_inner().written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::ResponseTopic => {
+                        response_topic.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(response_topic.as_ref().unwrap().0.written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::CorrelationData => {
+                        correlation_data.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(correlation_data.as_ref().unwrap().0.written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::UserProperty if !user_properties.is_full() => {
+                        let user_property = UserProperty::read(r).await?;
+
+                        properties_length = properties_length
+                            .checked_sub(user_property.0.written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+
+                        // Safety: `!Vec::is_full` guarantees there is space
+                        unsafe { user_properties.push_unchecked(user_property) };
+                    }
+                    PropertyType::UserProperty => {
+                        let len = UserProperty::skip(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(len)
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::SubscriptionIdentifier => {
+                        let subscription_identifier = SubscriptionIdentifier::read(r).await?;
+
+                        // The subscription identifiers in the packet are not guaranteed to be exhaustive
+                        #[allow(unused_must_use)]
+                        subscription_identifiers.push(subscription_identifier);
+                        properties_length = properties_length
+                            .checked_sub(subscription_identifier.into_inner().written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    PropertyType::ContentType => {
+                        content_type.try_set(r).await?;
+                        properties_length = properties_length
+                            .checked_sub(content_type.as_ref().unwrap().0.written_len())
+                            .ok_or(RxError::MalformedPacket)?;
+                    }
+                    p => {
+                        // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>
+                        trace!("invalid PUBLISH property: {:?}", p);
+                        return Err(RxError::MalformedPacket);
+                    }
+                }
+            }
+
+            let topic = match (topic_name, topic_alias) {
+                (None, None) => return Err(RxError::ProtocolError),
+                (None, Some(alias)) => TopicReference::Alias(alias.into_inner()),
+                (Some(name), None) => TopicReference::Name(name),
+                (Some(name), Some(alias)) => TopicReference::Mapping(name, alias.into_inner()),
+            };
+
+            let message_len = r.remaining_len();
+
+            verbose!("remaining PUBLISH payload: {} bytes", message_len);
+
+            Ok(Self {
+                dup,
+                identified_qos,
+                retain,
+                topic,
+                payload_format_indicator,
+                message_expiry_interval,
+                response_topic,
+                correlation_data,
+                user_properties,
+                subscription_identifiers,
+                content_type,
+                message_len,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod unit {
     use core::num::NonZero;
@@ -493,8 +719,8 @@ mod unit {
 
             0x08, // Response Topic
             0x00, 0x17,
-            b'u', b'n', b'o', b',', b' ', b'd', b'o', b's', b',', b' ', b't', b'r', b'e', b's', b',', b' ', b'c', b'a', b't', b'o', b'r', b'c', b'e', 
-            
+            b'u', b'n', b'o', b',', b' ', b'd', b'o', b's', b',', b' ', b't', b'r', b'e', b's', b',', b' ', b'c', b'a', b't', b'o', b'r', b'c', b'e',
+
             0x09, // Correlation Data
             0x00, 0x08,
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -505,11 +731,11 @@ mod unit {
 
             0x26, // User property
             0x00, 0x04, b'G', b'y', b'r', b'o',
-            0x00, 0x09, b'G', b'e', b'a', b'r', b'l', b'o', b'o', b's', b'e', 
+            0x00, 0x09, b'G', b'e', b'a', b'r', b'l', b'o', b'o', b's', b'e',
 
             0x03, // Content type
             0x00, 0x16,
-            b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't', b'i', b'o', b'n', b'/', b'j', b'a', b'v', b'a', b's', b'c', b'r', b'i', b'p', b't', 
+            b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't', b'i', b'o', b'n', b'/', b'j', b'a', b'v', b'a', b's', b'c', b'r', b'i', b'p', b't',
 
             b'h', // Payload
             b'e', //

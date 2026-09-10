@@ -59,7 +59,7 @@ impl FixedHeader {
 }
 
 /// Returned if [`PacketType`] is reserved.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Reserved;
 
