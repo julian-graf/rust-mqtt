@@ -1,6 +1,4 @@
-#[cfg(feature = "alloc")]
-use alloc::{boxed::Box, vec::Vec};
-use core::{borrow::Borrow, marker::PhantomData, ops::Deref};
+use core::marker::PhantomData;
 
 /// Contiguous bytes in memory. Is either a [`u8`] slice or (with crate feature "alloc") an owned
 /// [`Box`]<[u8]>.
@@ -21,6 +19,7 @@ pub struct Bytes<'a, B = &'a [u8]> {
 }
 
 impl<B> Bytes<'_, B> {
+    /// Creates new [`Bytes`].
     pub const fn new(bytes: B) -> Self {
         Self {
             b: bytes,

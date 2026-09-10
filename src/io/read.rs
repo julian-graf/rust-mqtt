@@ -156,7 +156,7 @@ impl<'b, R: Read, B: BufferProvider<'b>> Read for BodyReader<'_, 'b, R, B> {
     }
 }
 impl<'b, R: Read, B: BufferProvider<'b>> Store<'b> for BodyReader<'_, 'b, R, B> {
-    type Buffer = B::Inner;
+    type Buffer = B::Buffer;
 
     async fn read_and_store(
         &mut self,
@@ -180,7 +180,7 @@ impl<'b, R: Read, B: BufferProvider<'b>> Store<'b> for BodyReader<'_, 'b, R, B> 
             }
         }
 
-        Ok(buffer.into())
+        Ok(Bytes::new(buffer.into()))
     }
 }
 

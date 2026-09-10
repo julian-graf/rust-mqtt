@@ -6,10 +6,6 @@ pub use alloc::AllocBuffer;
 #[cfg(feature = "bump")]
 pub use bump::{BumpBuffer, InsufficientSpace};
 
-use crate::bytes::Bytes;
-
-pub trait BufferProviderSuper<'a> {}
-
 /// A trait to describe anything that can allocate memory.
 ///
 /// Returned memory can be borrowed or owned. Either way, it is bound by the `'a`
@@ -17,11 +13,13 @@ pub trait BufferProviderSuper<'a> {}
 ///
 /// The client does not store any references to memory returned by this provider.
 pub trait BufferProvider<'a> {
+    /// The type for prolonged storage of the allocated bytes.
+    type Buffer: AsRef<[u8]> + 'a;
+
     /// The type returned from a successful buffer provision.
-    /// Must implement [`AsMut`] so that it can be borrowed mutably right after allocation for
-    /// initialization and [`Into`] for storing as [`Bytes`].
-    type Inner: AsRef<[u8]>;
-    type Buffer: AsMut<[u8]> + Into<Bytes<'a, Self::Inner>>;
+    /// Must implement [`AsMut`] so that it can be borrowed mutably right after
+    /// allocation for initialization and [`Into`] for storing as [`Bytes`].
+    type BufferMut: AsMut<[u8]> + Into<Self::Buffer>;
 
     /// The error type returned from a failed buffer provision.
     #[cfg(not(feature = "defmt"))]
@@ -35,7 +33,7 @@ pub trait BufferProvider<'a> {
     /// # Errors
     ///
     /// Returns a value of its associated error type if the buffer provision fails.
-    fn provide_buffer(&mut self, len: usize) -> Result<Self::Buffer, Self::ProvisionError>;
+    fn provide_buffer(&mut self, len: usize) -> Result<Self::BufferMut, Self::ProvisionError>;
 }
 
 #[cfg(feature = "bump")]
@@ -63,11 +61,13 @@ mod bump {
 
     impl<'a> BufferProvider<'a> for BumpBuffer<'a> {
         type Buffer = &'a mut [u8];
+        type BufferMut = &'a mut [u8];
+
         type ProvisionError = InsufficientSpace;
 
         /// Return the next `len` bytes from the buffer, advancing the internal tracking
         /// index. Returns [`InsufficientSpace`] if there isn't enough room.
-        fn provide_buffer(&mut self, len: usize) -> Result<Self::Buffer, Self::ProvisionError> {
+        fn provide_buffer(&mut self, len: usize) -> Result<Self::BufferMut, Self::ProvisionError> {
             if self.remaining_len() < len {
                 Err(InsufficientSpace)
             } else {
@@ -268,8 +268,8 @@ mod alloc {
     pub struct AllocBuffer;
 
     impl<'a> BufferProvider<'a> for AllocBuffer {
-        type Inner = Box<[u8]>;
         type Buffer = Box<[u8]>;
+        type BufferMut = Box<[u8]>;
         type ProvisionError = Infallible;
 
         /// Allocates `len` bytes on the heap

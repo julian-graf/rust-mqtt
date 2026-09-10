@@ -9,24 +9,24 @@ use crate::{
     v5::property::{SubscriptionIdentifier, UserProperty},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct SubscribePacket<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> {
+pub struct SubscribePacket<'p, S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> {
     packet_identifier: PacketIdentifier,
 
     subscription_identifier: Option<SubscriptionIdentifier>,
-    user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
 
-    subscribe_filters: Vec<SubscriptionFilter<'p>, MAX_TOPIC_FILTERS>,
+    subscribe_filters: Vec<SubscriptionFilter<'p, S>, MAX_TOPIC_FILTERS>,
 }
 
-impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> Packet
-    for SubscribePacket<'_, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> Packet
+    for SubscribePacket<'_, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     const PACKET_TYPE: PacketType = PacketType::Subscribe;
 }
-impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
-    for SubscribePacket<'_, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<S: AsRef<[u8]>, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
+    for SubscribePacket<'_, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     fn remaining_len(&self) -> VarByteInt {
         // Safety: SUBSCRIBE packets that are too long to encode cannot be created
@@ -53,14 +53,14 @@ impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
     }
 }
 
-impl<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
-    SubscribePacket<'p, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<'p, S: AsRef<[u8]>, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
+    SubscribePacket<'p, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     pub fn new(
         packet_identifier: PacketIdentifier,
         subscription_identifier: Option<SubscriptionIdentifier>,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
-        subscribe_filters: Vec<SubscriptionFilter<'p>, MAX_TOPIC_FILTERS>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
+        subscribe_filters: Vec<SubscriptionFilter<'p, S>, MAX_TOPIC_FILTERS>,
     ) -> Result<Self, TooLargeToEncode> {
         let p = Self {
             packet_identifier,

@@ -16,18 +16,17 @@ pub(crate) enum ReAuthState {
 }
 
 /// Options for enhanced authentication for the AUTH packet.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct AuthOptions<'a, const MAX_USER_PROPERTIES: usize> {
+pub struct AuthOptions<'a, S, const MAX_USER_PROPERTIES: usize> {
     /// The authentication data property of the AUTH packet.
-    pub authentication_data: Option<MqttBinary<'a>>,
+    pub authentication_data: Option<MqttBinary<'a, S>>,
 
     /// The reason string property of the AUTH packet.
-    pub reason_string: Option<MqttString<'a>>,
+    pub reason_string: Option<MqttString<'a, S>>,
 
     /// Arbitrary key-value pairs of strings sent as the user property entries
     /// of the AUTH packet.
-    pub user_properties: Vec<MqttStringPair<'a>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'a, S>, MAX_USER_PROPERTIES>,
 }
 
 /// An enhanced authentication mechanism for use in MQTTv5's extended/enhanced
@@ -53,6 +52,10 @@ pub trait AuthMechanism<const MAX_USER_PROPERTIES: usize> {
     ///
     /// [`MqttError::EnhancedAuthFailed`]: crate::client::MqttError::EnhancedAuthFailed
     type Error;
+
+    /// The type used for passing authentication data or other properties produced
+    /// by the authentication mechanism back to the client.
+    type Buffer: AsRef<[u8]>;
 
     /// An AUTH packet with [`ReasonCode::ContinueAuthentication`] was received.
     /// The [`AuthMechanism`] executes it checks and produces the next step
@@ -81,10 +84,11 @@ pub trait AuthMechanism<const MAX_USER_PROPERTIES: usize> {
     /// [`Client::abort`]: crate::client::Client::abort
     /// [`Client::disconnect`]: crate::client::Client::disconnect
     /// [`Ok(Auth)`]: core::result::Result::Ok
-    fn kontinue(
+    #[expect(clippy::type_complexity)]
+    fn kontinue<S: AsRef<[u8]>>(
         &mut self,
-        auth: &Auth<'_, MAX_USER_PROPERTIES>,
-    ) -> Result<AuthOptions<'_, MAX_USER_PROPERTIES>, (Self::Error, Option<ReasonCode>)>;
+        auth: &Auth<'_, S, MAX_USER_PROPERTIES>,
+    ) -> Result<AuthOptions<'_, Self::Buffer, MAX_USER_PROPERTIES>, (Self::Error, Option<ReasonCode>)>;
 
     /// A CONNACK packet with [`ReasonCode::Success`] was received. The
     /// properties of this CONNACK packet have been mapped to the fields of the
@@ -119,8 +123,8 @@ pub trait AuthMechanism<const MAX_USER_PROPERTIES: usize> {
     /// [`MqttError::EnhancedAuthFailed`]: crate::client::MqttError::EnhancedAuthFailed
     /// [`Client::abort`]: crate::client::Client::abort
     /// [`Client::disconnect`]: crate::client::Client::disconnect
-    fn success(
+    fn success<S: AsRef<[u8]>>(
         &mut self,
-        auth: &Auth<'_, MAX_USER_PROPERTIES>,
+        auth: &Auth<'_, S, MAX_USER_PROPERTIES>,
     ) -> Result<(), (Self::Error, Option<ReasonCode>)>;
 }

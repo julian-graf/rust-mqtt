@@ -157,7 +157,7 @@ impl<'c> Options<'c> {
 impl<'c> Options<'c> {
     pub(crate) fn as_borrowed_will<const MAX_USER_PROPERTIES: usize>(
         &'c self,
-    ) -> Will<'c, MAX_USER_PROPERTIES> {
+    ) -> Will<'c, &'c [u8], MAX_USER_PROPERTIES> {
         Will {
             will_topic: self.will_topic.as_borrowed(),
             will_delay_interval: match self.will_delay_interval {

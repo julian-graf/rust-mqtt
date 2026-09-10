@@ -16,9 +16,9 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct ConnectPacket<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct ConnectPacket<'p, S, const MAX_USER_PROPERTIES: usize> {
     // CONNECT connect flags (will flag is implicit due to `will` being an Option<T>)
     will_retain: bool,
     will_qos: QoS,
@@ -34,26 +34,28 @@ pub struct ConnectPacket<'p, const MAX_USER_PROPERTIES: usize> {
     topic_alias_maximum: Option<TopicAliasMaximum>,
     request_response_information: Option<RequestResponseInformation>,
     request_problem_information: Option<RequestProblemInformation>,
-    user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
-    authentication_method: Option<AuthenticationMethod<'p>>,
-    authentication_data: Option<AuthenticationData<'p>>,
+    user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
+    authentication_method: Option<AuthenticationMethod<'p, S>>,
+    authentication_data: Option<AuthenticationData<'p, S>>,
 
     // CONNECT payload
     /// Must always be in Connect Payload. Can be length 0
-    client_identifier: MqttString<'p>,
+    client_identifier: MqttString<'p, S>,
 
     /// Has to be present if `will_flag` is set
-    will: Option<Will<'p, MAX_USER_PROPERTIES>>,
+    will: Option<Will<'p, S, MAX_USER_PROPERTIES>>,
 
     /// Has to be present if `user_name` flag is set
-    user_name: Option<MqttString<'p>>,
+    user_name: Option<MqttString<'p, S>>,
     /// Has to be present if `password` flag is set
-    password: Option<MqttBinary<'p>>,
+    password: Option<MqttBinary<'p, S>>,
 }
-impl<const MAX_USER_PROPERTIES: usize> Packet for ConnectPacket<'_, MAX_USER_PROPERTIES> {
+impl<S, const MAX_USER_PROPERTIES: usize> Packet for ConnectPacket<'_, S, MAX_USER_PROPERTIES> {
     const PACKET_TYPE: PacketType = PacketType::Connect;
 }
-impl<const MAX_USER_PROPERTIES: usize> TxPacket for ConnectPacket<'_, MAX_USER_PROPERTIES> {
+impl<S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> TxPacket
+    for ConnectPacket<'_, S, MAX_USER_PROPERTIES>
+{
     fn remaining_len(&self) -> VarByteInt {
         let variable_header_length = wlen!([u8; 7]) + wlen!(u8) + wlen!(u16);
 
@@ -127,10 +129,10 @@ impl<const MAX_USER_PROPERTIES: usize> TxPacket for ConnectPacket<'_, MAX_USER_P
     }
 }
 
-impl<'p, const MAX_USER_PROPERTIES: usize> ConnectPacket<'p, MAX_USER_PROPERTIES> {
+impl<'p, S, const MAX_USER_PROPERTIES: usize> ConnectPacket<'p, S, MAX_USER_PROPERTIES> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        client_identifier: MqttString<'p>,
+        client_identifier: MqttString<'p, S>,
         clean_start: bool,
         keep_alive: KeepAlive,
         maximum_packet_size: MaximumPacketSize,
@@ -138,7 +140,7 @@ impl<'p, const MAX_USER_PROPERTIES: usize> ConnectPacket<'p, MAX_USER_PROPERTIES
         receive_maximum: NonZero<u16>,
         request_response_information: bool,
         request_problem_information: bool,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     ) -> Self {
         const {
             const_assert!(MAX_USER_PROPERTIES <= 1021);
@@ -170,6 +172,34 @@ impl<'p, const MAX_USER_PROPERTIES: usize> ConnectPacket<'p, MAX_USER_PROPERTIES
         }
     }
 
+    pub fn add_authentication_method(&mut self, authentication_method: AuthenticationMethod<'p, S>) {
+        self.authentication_method = Some(authentication_method);
+    }
+    pub fn add_authentication_data(&mut self, authentication_data: AuthenticationData<'p, S>) {
+        self.authentication_data = Some(authentication_data);
+    }
+
+    pub fn add_user_name(&mut self, user_name: MqttString<'p, S>) {
+        self.user_name = Some(user_name);
+    }
+    pub fn add_password(&mut self, password: MqttBinary<'p, S>) {
+        self.password = Some(password);
+    }
+
+    pub fn add_will(
+        &mut self,
+        will: Will<'p, S, MAX_USER_PROPERTIES>,
+        will_qos: QoS,
+        will_retain: bool,
+    ) {
+        self.will_retain = will_retain;
+        self.will_qos = will_qos;
+        self.will = Some(will);
+    }
+}
+impl<'p, S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize>
+    ConnectPacket<'p, S, MAX_USER_PROPERTIES>
+{
     pub fn properties_length(&self) -> VarByteInt {
         let session_expiry_interval_len =
             if self.session_expiry_interval == SessionExpiryInterval::EndOnDisconnect {
@@ -204,31 +234,6 @@ impl<'p, const MAX_USER_PROPERTIES: usize> ConnectPacket<'p, MAX_USER_PROPERTIES
         // authentication method: 65538
         // authentication data: 65538
         VarByteInt::new_unchecked(len as u32)
-    }
-
-    pub fn add_authentication_method(&mut self, authentication_method: AuthenticationMethod<'p>) {
-        self.authentication_method = Some(authentication_method);
-    }
-    pub fn add_authentication_data(&mut self, authentication_data: AuthenticationData<'p>) {
-        self.authentication_data = Some(authentication_data);
-    }
-
-    pub fn add_user_name(&mut self, user_name: MqttString<'p>) {
-        self.user_name = Some(user_name);
-    }
-    pub fn add_password(&mut self, password: MqttBinary<'p>) {
-        self.password = Some(password);
-    }
-
-    pub fn add_will(
-        &mut self,
-        will: Will<'p, MAX_USER_PROPERTIES>,
-        will_qos: QoS,
-        will_retain: bool,
-    ) {
-        self.will_retain = will_retain;
-        self.will_qos = will_qos;
-        self.will = Some(will);
     }
 }
 

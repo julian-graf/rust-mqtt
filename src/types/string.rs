@@ -251,6 +251,7 @@ impl<'s, B: AsRef<[u8]>> MqttString<'s, B> {
     ///
     /// * [`MqttStringError::NullCharacter`] if `s` contains an ASCII `\0` character.
     /// * [`MqttStringError::TooLargeToEncode`] if `s`' length exceeds [`MqttString::MAX_LENGTH`].
+    #[expect(clippy::should_implement_trait)]   // cannot implement FromStr due to lifetime constraints
     pub fn from_str(s: &'s str) -> Result<MqttString<'s>, MqttStringError> {
         let mut i = 0;
         while i < s.len() {

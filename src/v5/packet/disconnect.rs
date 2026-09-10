@@ -15,25 +15,25 @@ use crate::{
     v5::property::{AtMostOnceProperty, PropertyType, ReasonString, ServerReference, UserProperty},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct DisconnectPacket<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct DisconnectPacket<'p, S, const MAX_USER_PROPERTIES: usize> {
     pub reason_code: ReasonCode,
 
     /// Never sent by server
     pub session_expiry_interval: Option<SessionExpiryInterval>,
-    pub reason_string: Option<ReasonString<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
-    pub server_reference: Option<ServerReference<'p>>,
+    pub reason_string: Option<ReasonString<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
+    pub server_reference: Option<ServerReference<'p, S>>,
 }
 
-impl<const MAX_USER_PROPERTIES: usize> Packet for DisconnectPacket<'_, MAX_USER_PROPERTIES> {
+impl<S, const MAX_USER_PROPERTIES: usize> Packet for DisconnectPacket<'_, S, MAX_USER_PROPERTIES> {
     const PACKET_TYPE: PacketType = PacketType::Disconnect;
 }
-impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
-    for DisconnectPacket<'p, MAX_USER_PROPERTIES>
+impl<'p, R: Read, B: BufferProvider<'p>, const MAX_USER_PROPERTIES: usize> RxPacket<'p, R, B>
+    for DisconnectPacket<'p, B::Buffer, MAX_USER_PROPERTIES>
 {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -136,7 +136,7 @@ impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    UserProperty::skip(r).await?;
+                    UserProperty::<&[u8]>::skip(r).await?;
                 }
                 PropertyType::ServerReference => server_reference.try_set(r).await?,
                 // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>
@@ -156,7 +156,9 @@ impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
         })
     }
 }
-impl<const MAX_USER_PROPERTIES: usize> TxPacket for DisconnectPacket<'_, MAX_USER_PROPERTIES> {
+impl<S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> TxPacket
+    for DisconnectPacket<'_, S, MAX_USER_PROPERTIES>
+{
     async fn send<W: Write>(&self, write: &mut W) -> Result<(), TxError<W::Error>> {
         FixedHeader::new(Self::PACKET_TYPE, 0x00, self.remaining_len())
             .write(write)
@@ -196,12 +198,12 @@ impl<const MAX_USER_PROPERTIES: usize> TxPacket for DisconnectPacket<'_, MAX_USE
     }
 }
 
-impl<'p, const MAX_USER_PROPERTIES: usize> DisconnectPacket<'p, MAX_USER_PROPERTIES> {
+impl<'p, S, const MAX_USER_PROPERTIES: usize> DisconnectPacket<'p, S, MAX_USER_PROPERTIES> {
     pub const fn new(
         reason_code: ReasonCode,
         session_expiry_interval: Option<SessionExpiryInterval>,
-        reason_string: Option<ReasonString<'p>>,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        reason_string: Option<ReasonString<'p, S>>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     ) -> Self {
         const {
             const_assert!(MAX_USER_PROPERTIES <= 2046);
@@ -215,7 +217,10 @@ impl<'p, const MAX_USER_PROPERTIES: usize> DisconnectPacket<'p, MAX_USER_PROPERT
             server_reference: None,
         }
     }
-
+}
+impl<'p, S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize>
+    DisconnectPacket<'p, S, MAX_USER_PROPERTIES>
+{
     fn properties_length(&self) -> VarByteInt {
         let len = self.session_expiry_interval.written_len()
             + self.reason_string.written_len()

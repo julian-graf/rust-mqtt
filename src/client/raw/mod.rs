@@ -116,7 +116,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
                 Err(AbortError::Terminated)
             }
             NetState::DueDisconnect(mut n, r) => {
-                let packet = DisconnectPacket::<0>::new(r, None, None, Vec::new());
+                let packet = DisconnectPacket::<&[u8], 0>::new(r, None, None, Vec::new());
 
                 debug!("sending DISCONNECT packet with reason code: {:?}", r);
 
@@ -258,7 +258,7 @@ impl<'b, N: Transport, B: BufferProvider<'b>> Raw<'b, N, B> {
     ///
     /// Does not perform a check on headers packet type
     /// => Assumes you call this only for correct packet headers
-    pub async fn recv_body<P: RxPacket<'b>>(
+    pub async fn recv_body<P: RxPacket<'b, N, B>>(
         &mut self,
         header: &FixedHeader,
     ) -> Result<P, RawError<B::ProvisionError>> {

@@ -18,9 +18,9 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct ConnackPacket<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct ConnackPacket<'p, S, const MAX_USER_PROPERTIES: usize> {
     pub session_present: bool,
     pub reason_code: ReasonCode,
 
@@ -30,25 +30,27 @@ pub struct ConnackPacket<'p, const MAX_USER_PROPERTIES: usize> {
     pub maximum_qos: Option<MaximumQoS>,
     pub retain_available: Option<RetainAvailable>,
     pub maximum_packet_size: Option<MaximumPacketSize>,
-    pub assigned_client_identifier: Option<AssignedClientIdentifier<'p>>,
+    pub assigned_client_identifier: Option<AssignedClientIdentifier<'p, S>>,
     pub topic_alias_maximum: Option<TopicAliasMaximum>,
-    pub reason_string: Option<ReasonString<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    pub reason_string: Option<ReasonString<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     pub wildcard_subscription_available: Option<WildcardSubscriptionAvailable>,
     pub subscription_identifier_available: Option<SubscriptionIdentifierAvailable>,
     pub shared_subscription_available: Option<SharedSubscriptionAvailable>,
     pub server_keep_alive: Option<ServerKeepAlive>,
-    pub response_information: Option<ResponseInformation<'p>>,
-    pub server_reference: Option<ServerReference<'p>>,
-    pub authentication_method: Option<AuthenticationMethod<'p>>,
-    pub authentication_data: Option<AuthenticationData<'p>>,
+    pub response_information: Option<ResponseInformation<'p, S>>,
+    pub server_reference: Option<ServerReference<'p, S>>,
+    pub authentication_method: Option<AuthenticationMethod<'p, S>>,
+    pub authentication_data: Option<AuthenticationData<'p, S>>,
 }
 
-impl<const MAX_USER_PROPERTIES: usize> Packet for ConnackPacket<'_, MAX_USER_PROPERTIES> {
+impl<S, const MAX_USER_PROPERTIES: usize> Packet for ConnackPacket<'_, S, MAX_USER_PROPERTIES> {
     const PACKET_TYPE: PacketType = PacketType::Connack;
 }
-impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p> for ConnackPacket<'p, MAX_USER_PROPERTIES> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+impl<'p, R: Read, B: BufferProvider<'p>, const MAX_USER_PROPERTIES: usize> RxPacket<'p, R, B>
+    for ConnackPacket<'p, B::Buffer, MAX_USER_PROPERTIES>
+{
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -157,7 +159,7 @@ impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p> for ConnackPacket<'p, MA
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    UserProperty::skip(r).await?;
+                    UserProperty::<B::Buffer>::skip(r).await?;
                 }
                 PropertyType::WildcardSubscriptionAvailable => wildcard_subscription_available.try_set(r).await?,
                 PropertyType::SubscriptionIdentifierAvailable => subscription_identifier_available.try_set(r).await?,

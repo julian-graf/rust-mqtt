@@ -11,24 +11,26 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Will<'w, const MAX_USER_PROPERTIES: usize> {
-    pub will_topic: TopicName<'w>,
+pub struct Will<'w, S, const MAX_USER_PROPERTIES: usize> {
+    pub will_topic: TopicName<'w, S>,
 
     // Will properties
     pub will_delay_interval: Option<WillDelayInterval>,
     pub payload_format_indicator: Option<PayloadFormatIndicator>,
     pub message_expiry_interval: Option<MessageExpiryInterval>,
-    pub content_type: Option<ContentType<'w>>,
-    pub response_topic: Option<ResponseTopic<'w>>,
-    pub correlation_data: Option<CorrelationData<'w>>,
-    pub user_properties: Vec<UserProperty<'w>, MAX_USER_PROPERTIES>,
+    pub content_type: Option<ContentType<'w, S>>,
+    pub response_topic: Option<ResponseTopic<'w, S>>,
+    pub correlation_data: Option<CorrelationData<'w, S>>,
+    pub user_properties: Vec<UserProperty<'w, S>, MAX_USER_PROPERTIES>,
 
-    pub will_message: MqttBinary<'w>,
+    pub will_message: MqttBinary<'w, S>,
 }
 
-impl<'w, const MAX_USER_PROPERTIES: usize> From<WillOptions<'w>> for Will<'w, MAX_USER_PROPERTIES> {
+impl<'w, const MAX_USER_PROPERTIES: usize> From<WillOptions<'w>>
+    for Will<'w, &'w [u8], MAX_USER_PROPERTIES>
+{
     fn from(options: WillOptions<'w>) -> Self {
         Self {
             will_topic: options.will_topic,
@@ -52,7 +54,9 @@ impl<'w, const MAX_USER_PROPERTIES: usize> From<WillOptions<'w>> for Will<'w, MA
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize> Writable for Will<'_, MAX_USER_PROPERTIES> {
+impl<S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> Writable
+    for Will<'_, S, MAX_USER_PROPERTIES>
+{
     fn written_len(&self) -> usize {
         let will_properties_length = self.will_properties_length();
 
@@ -91,7 +95,7 @@ impl<const MAX_USER_PROPERTIES: usize> Writable for Will<'_, MAX_USER_PROPERTIES
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize> Will<'_, MAX_USER_PROPERTIES> {
+impl<S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> Will<'_, S, MAX_USER_PROPERTIES> {
     pub fn will_properties_length(&self) -> VarByteInt {
         let will_properties_length = self.will_delay_interval.written_len()
             + self.payload_format_indicator.written_len()

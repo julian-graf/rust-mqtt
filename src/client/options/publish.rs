@@ -190,7 +190,6 @@ impl<'p> Options<'p> {
 ///
 /// Topic aliases must not be 0
 #[derive(Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TopicReference<'t, T = &'t [u8]> {
     /// Publish to the inner topic name without creating an alias.
     Name(TopicName<'t, T>),
@@ -217,10 +216,10 @@ impl<'t, T: AsRef<[u8]>> core::fmt::Debug for TopicReference<'t, T> {
 impl<'a, T: AsRef<[u8]>> defmt::Format for TopicReference<'a, T> {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
-            Self::Name(arg0) => defmt::write!(fmt, "Name({:?})", arg0.as_ref()),
-            Self::Alias(arg0) => defmt::write!(fmt, "Alias({:?})", arg0.as_ref()),
+            Self::Name(arg0) => defmt::write!(fmt, "Name({:?})", arg0),
+            Self::Alias(arg0) => defmt::write!(fmt, "Alias({:?})", arg0),
             Self::Mapping(arg0, arg1) => {
-                defmt::write!(fmt, "Mapping({:?}, {:?})", arg0.as_ref(), arg1.as_ref())
+                defmt::write!(fmt, "Mapping({:?}, {:?})", arg0, arg1)
             }
         }
     }

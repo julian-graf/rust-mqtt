@@ -1,10 +1,9 @@
-use const_fn::const_fn;
 use heapless::Vec;
 
 use crate::{
     client::options::{RetainHandling, SubscriptionOptions},
     eio::Write,
-    fmt::{const_debug_assert, debug_assert},
+    fmt::debug_assert,
     io::{
         err::WriteError,
         write::{Writable, wlen},
@@ -20,7 +19,6 @@ use crate::{
 /// - "sport/tennis/player1/ranking"
 /// - "sport/tennis/player1/score/wimbledon"
 #[derive(Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TopicName<'t, S = &'t [u8]>(MqttString<'t, S>);
 
 impl<'t, S: AsRef<[u8]>> core::fmt::Debug for TopicName<'t, S> {
@@ -74,7 +72,6 @@ impl<'t, S: AsRef<[u8]>> TopicName<'t, S> {
     }
 
     /// Creates a new topic name while checking for correct syntax of the topic name string.
-    #[const_fn(cfg(not(feature = "alloc")))]
     #[must_use]
     pub fn new(string: MqttString<'t, S>) -> Option<Self> {
         if Self::is_valid(&string) {
@@ -106,7 +103,7 @@ impl<'t, S: AsRef<[u8]>> TopicName<'t, S> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub fn as_borrowed(&'t self) -> TopicName<'_, &'_ [u8]> {
+    pub fn as_borrowed(&'t self) -> TopicName<'t> {
         TopicName(self.0.as_borrowed())
     }
 }
@@ -129,7 +126,6 @@ impl<'t, S> From<TopicName<'t, S>> for MqttString<'t, S> {
 /// - "sport/tennis/#"
 /// - "sport/+/player1"
 #[derive(Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TopicFilter<'t, S = &'t [u8]>(MqttString<'t, S>);
 
 impl<'t, S: AsRef<[u8]>> core::fmt::Debug for TopicFilter<'t, S> {
@@ -288,7 +284,6 @@ impl<'t, S: AsRef<[u8]>> TopicFilter<'t, S> {
     /// Creates a new topic filter while checking for correct syntax of the topic filter string.
     /// If the filter starts with "$share", the constraints for a shared subscription's topic
     /// filter are also enforced.
-    #[const_fn(cfg(not(feature = "alloc")))]
     #[must_use]
     pub fn new(string: MqttString<'t, S>) -> Option<Self> {
         if Self::is_valid(&string) {
@@ -320,7 +315,7 @@ impl<'t, S: AsRef<[u8]>> TopicFilter<'t, S> {
     /// [`Bytes::as_borrowed`]: crate::Bytes::as_borrowed
     #[inline]
     #[must_use]
-    pub fn as_borrowed(&'t self) -> TopicFilter {
+    pub fn as_borrowed(&'t self) -> TopicFilter<'t> {
         TopicFilter(self.0.as_borrowed())
     }
 }
@@ -336,10 +331,10 @@ impl<'t, S> From<TopicFilter<'t, S>> for MqttString<'t, S> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct SubscriptionFilter<'t> {
-    topic: TopicFilter<'t>,
+pub struct SubscriptionFilter<'t, S> {
+    topic: TopicFilter<'t, S>,
     subscription_options: u8,
 }
 
@@ -349,7 +344,9 @@ pub struct SubscriptionFilter<'t> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoLocalSharedSubscription;
 
-impl<const MAX_TOPIC_FILTERS: usize> Writable for Vec<SubscriptionFilter<'_>, MAX_TOPIC_FILTERS> {
+impl<S: AsRef<[u8]>, const MAX_TOPIC_FILTERS: usize> Writable
+    for Vec<SubscriptionFilter<'_, S>, MAX_TOPIC_FILTERS>
+{
     fn written_len(&self) -> usize {
         self.iter()
             .map(|t| &t.topic)
@@ -367,9 +364,9 @@ impl<const MAX_TOPIC_FILTERS: usize> Writable for Vec<SubscriptionFilter<'_>, MA
     }
 }
 
-impl<'t> SubscriptionFilter<'t> {
+impl<'t, S: AsRef<[u8]>> SubscriptionFilter<'t, S> {
     pub fn new(
-        topic: TopicFilter<'t>,
+        topic: TopicFilter<'t, S>,
         options: &SubscriptionOptions,
     ) -> Result<Self, NoLocalSharedSubscription> {
         if options.no_local && topic.is_shared() {

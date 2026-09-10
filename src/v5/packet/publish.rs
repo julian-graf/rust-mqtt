@@ -23,10 +23,11 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PublishPacket<
     'p,
+    S,
     const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
     const MAX_USER_PROPERTIES: usize,
 > {
@@ -34,30 +35,36 @@ pub struct PublishPacket<
     pub identified_qos: IdentifiedQoS,
     pub retain: bool,
 
-    pub topic: TopicReference<'p>,
+    pub topic: TopicReference<'p, S>,
 
     // TODO clarify whether PayloadFormatIndicator can be included only once
     pub payload_format_indicator: Option<PayloadFormatIndicator>,
 
     // TODO clarify whether MessageExpiryInterval can be included only once
     pub message_expiry_interval: Option<MessageExpiryInterval>,
-    pub response_topic: Option<ResponseTopic<'p>>,
-    pub correlation_data: Option<CorrelationData<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    pub response_topic: Option<ResponseTopic<'p, S>>,
+    pub correlation_data: Option<CorrelationData<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     pub subscription_identifiers: Vec<SubscriptionIdentifier, MAX_SUBSCRIPTION_IDENTIFIERS>,
-    pub content_type: Option<ContentType<'p>>,
-    pub message: Bytes<'p>,
+    pub content_type: Option<ContentType<'p, S>>,
+    pub message: Bytes<'p, S>,
 }
 
-impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> Packet
-    for PublishPacket<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+impl<S, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> Packet
+    for PublishPacket<'_, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
     const PACKET_TYPE: PacketType = PacketType::Publish;
 }
-impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
-    for PublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+impl<
+    'p,
+    R: Read,
+    B: BufferProvider<'p>,
+    const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+> RxPacket<'p, R, B>
+    for PublishPacket<'p, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -100,11 +107,11 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
         let mut payload_format_indicator: Option<PayloadFormatIndicator> = None;
         let mut message_expiry_interval: Option<MessageExpiryInterval> = None;
         let mut topic_alias: Option<TopicAlias> = None;
-        let mut response_topic: Option<ResponseTopic<'_>> = None;
-        let mut correlation_data: Option<CorrelationData<'_>> = None;
+        let mut response_topic: Option<ResponseTopic<'_, _>> = None;
+        let mut correlation_data: Option<CorrelationData<'_, _>> = None;
         let mut user_properties = Vec::new();
         let mut subscription_identifiers = Vec::new();
-        let mut content_type: Option<ContentType<'_>> = None;
+        let mut content_type: Option<ContentType<'_, _>> = None;
 
         while properties_length > 0 {
             verbose!(
@@ -163,7 +170,7 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    let len = UserProperty::skip(r).await?;
+                    let len = UserProperty::<&[u8]>::skip(r).await?;
                     properties_length = properties_length
                         .checked_sub(len)
                         .ok_or(RxError::MalformedPacket)?;
@@ -221,8 +228,8 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
         })
     }
 }
-impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
-    for PublishPacket<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+impl<S: AsRef<[u8]>, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
+    TxPacket for PublishPacket<'_, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
     fn remaining_len(&self) -> VarByteInt {
         // Safety: PUBLISH packets that are too long to encode cannot be created
@@ -240,6 +247,7 @@ impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize
         self.topic
             .topic_name()
             .map(TopicName::as_borrowed)
+            // Invariant: Empty string does not exceed MqttString::MAX_LENGTH
             .map_or(MqttString::<&[u8]>::from_str_unchecked(""), Into::into)
             .write(write)
             .await?;
@@ -268,26 +276,23 @@ impl<const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize
     }
 }
 
-impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
-    PublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+impl<'p, S: AsRef<[u8]>, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
+    PublishPacket<'p, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
-    // Invariant: Empty string does not exceed MqttString::MAX_LENGTH
-    // const EMPTY_TOPIC: MqttString<'static> = MqttString::<&[u8]>::from_str_unchecked("");
-
     /// Creates a new packet with Quality of Service 0
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         dup: bool,
         identified_qos: IdentifiedQoS,
         retain: bool,
-        topic: TopicReference<'p>,
+        topic: TopicReference<'p, S>,
         payload_format_indicator: Option<PayloadFormatIndicator>,
         message_expiry_interval: Option<MessageExpiryInterval>,
-        response_topic: Option<TopicName<'p>>,
-        correlation_data: Option<MqttBinary<'p>>,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
-        content_type: Option<ContentType<'p>>,
-        message: Bytes<'p>,
+        response_topic: Option<TopicName<'p, S>>,
+        correlation_data: Option<MqttBinary<'p, S>>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
+        content_type: Option<ContentType<'p, S>>,
+        message: Bytes<'p, S>,
     ) -> Result<Self, TooLargeToEncode> {
         let p = Self {
             dup,
@@ -312,6 +317,7 @@ impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: u
             .topic
             .topic_name()
             .map(TopicName::as_borrowed)
+            // Invariant: Empty string does not exceed MqttString::MAX_LENGTH
             .map_or(MqttString::<&[u8]>::from_str_unchecked(""), Into::into)
             .written_len();
 

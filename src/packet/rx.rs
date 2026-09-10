@@ -10,9 +10,9 @@ use crate::{
     v5::property::AtMostOncePropertyError,
 };
 
-pub trait RxPacket<'p>: Packet + Sized {
+pub trait RxPacket<'p, R: Read, B: BufferProvider<'p>>: Packet + Sized {
     /// Receives a packet. Must check the fixed header for correctness.
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    async fn receive(
         header: &FixedHeader,
         reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>>;

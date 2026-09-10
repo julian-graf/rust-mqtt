@@ -19,35 +19,31 @@ pub use partial::{PartialPublish, PartialPublishEvent};
 ///
 /// Does not include the [`ReasonCode`] as it is always [`ReasonCode::Success`]
 /// (0x00) if this event is returned.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Connected<'i, const MAX_USER_PROPERTIES: usize> {
+pub struct Connected<'i, S, const MAX_USER_PROPERTIES: usize> {
     /// If set to true, a previous session has been continued by the server for this connection.
     pub session_present: bool,
 
     /// The server can assign a different client identifier than the one in the CONNECT packet
     /// or must assign a client identifier if none was included in the CONNECT packet. This is
     /// the final client identifier value used for this session and connection.
-    pub client_identifier: MqttString<'i>,
+    pub client_identifier: MqttString<'i, S>,
 
     /// The user property entries in the CONNACK packet. If the vector is full, this list might
     /// not be exhaustive.
-    pub user_properties: Vec<MqttStringPair<'i>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'i, S>, MAX_USER_PROPERTIES>,
 
     /// Response information used to create response topics.
-    pub response_information: Option<MqttString<'i>>,
+    pub response_information: Option<MqttString<'i, S>>,
 
     /// Another server which can be used.
-    pub server_reference: Option<MqttString<'i>>,
+    pub server_reference: Option<MqttString<'i, S>>,
 
     /// The authentication data in the CONNACK packet.
-    pub authentication_data: Option<MqttBinary<'i>>,
+    pub authentication_data: Option<MqttBinary<'i, S>>,
 }
 
 /// Events emitted by the client when receiving an MQTT packet.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> {
+pub enum Event<'e, S, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> {
     /// The server sent a PINGRESP packet.
     Pingresp,
 
@@ -71,19 +67,19 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     /// [`Client::manual_acknowledge`]: crate::client::Client::manual_acknowledge
     /// [`Client::manual_receive`]: crate::client::Client::manual_receive
-    Publish(Publish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+    Publish(Publish<'e, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
 
     /// The server sent a SUBACK packet matching a SUBSCRIBE packet.
     ///
     /// The subscription process is complete and was successful if the [`ReasonCode`] indicates
     /// success. The SUBSCRIBE packet won't have to be resent.
-    Suback(Suback<'e, MAX_USER_PROPERTIES>),
+    Suback(Suback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent an UNSUBACK packet matching an UNSUBSCRIBE packet.
     ///
     /// The unsubscription process is complete and was successful if the [`ReasonCode`]
     /// indicates success. The UNSUBSCRIBE packet won't have to be resent.
-    Unsuback(Suback<'e, MAX_USER_PROPERTIES>),
+    Unsuback(Suback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBACK, PUBREC or PUBCOMP with an erroneous [`ReasonCode`],
     /// therefore rejecting the publication. The publication process is aborted, the client
@@ -98,7 +94,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// between the session state on the client and server.
     ///
     /// [`Client::publish`]: crate::client::Client::publish
-    PublishRejected(Pubrej<'e, MAX_USER_PROPERTIES>),
+    PublishRejected(Pubrej<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBREL with an erroneous [`ReasonCode`], therefore aborting its own
     /// publication. The reason code can only be [`ReasonCode::PacketIdentifierNotFound`].
@@ -113,7 +109,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// [`QoS`]: crate::types::QoS
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     /// [`QoS::AtLeastOnce`]: crate::types::QoS::AtLeastOnce
-    PublishAborted(Pubrej<'e, MAX_USER_PROPERTIES>),
+    PublishAborted(Pubrej<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBACK packet matching a [`QoS::AtLeastOnce`] PUBLISH packet
     /// confirming that the PUBLISH has been received. The [`QoS::AtLeastOnce`]
@@ -124,7 +120,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// The included [`ReasonCode`] is always successful.
     ///
     /// [`QoS::AtLeastOnce`]: crate::types::QoS::AtLeastOnce
-    PublishAcknowledged(Puback<'e, MAX_USER_PROPERTIES>),
+    PublishAcknowledged(Puback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBREC packet matching a [`QoS::ExactlyOnce`] PUBLISH packet
     /// confirming that the PUBLISH has been received. The first handshake of the
@@ -137,7 +133,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     /// [`Client::manual_release`]: crate::client::Client::manual_release
-    PublishReceived(Puback<'e, MAX_USER_PROPERTIES>),
+    PublishReceived(Puback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBREL packet matching a [`QoS::ExactlyOnce`] PUBREC packet
     /// confirming that the PUBREC has been received. The [`QoS::ExactlyOnce`]
@@ -150,7 +146,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     /// [`Client::manual_complete`]: crate::client::Client::manual_complete
-    PublishReleased(Puback<'e, MAX_USER_PROPERTIES>),
+    PublishReleased(Puback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a PUBCOMP packet matching a [`QoS::ExactlyOnce`] PUBREL packet
     /// confirming that the PUBREL has been received. The [`QoS::ExactlyOnce`]
@@ -162,7 +158,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     /// The included [`ReasonCode`] is always successful.
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
-    PublishComplete(Puback<'e, MAX_USER_PROPERTIES>),
+    PublishComplete(Puback<'e, S, MAX_USER_PROPERTIES>),
 
     /// The server sent a SUBACK, UNSUBACK, PUBACK, PUBREC, PUBREL or PUBCOMP
     /// packet with a packet identifier that is not in flight (anymore) or the
@@ -194,7 +190,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     ///
     /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
     /// [`Client::ack_manually_when`]: crate::client::Client::ack_manually_when
-    Duplicate(Publish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+    Duplicate(Publish<'e, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
 
     /// The server sent an AUTH packet. This event is only emitted if
     /// [`Client::connect_enhanced`] was used for the current network connection. Consequently,
@@ -202,21 +198,19 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     ///
     /// [`Client::connect_enhanced`]: crate::client::Client::connect_enhanced
     /// [`Client::connect`]: crate::client::Client::connect
-    Auth(Auth<'e, MAX_USER_PROPERTIES>),
+    Auth(Auth<'e, S, MAX_USER_PROPERTIES>),
 }
 
 /// Content of [`Event::Suback`].
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Suback<'s, const MAX_USER_PROPERTIES: usize> {
+pub struct Suback<'s, S, const MAX_USER_PROPERTIES: usize> {
     /// Packet identifier of the acknowledged SUBSCRIBE packet.
     pub packet_identifier: PacketIdentifier,
 
     /// The reason string of the SUBACK/UNSUBACK packet.
-    pub reason_string: Option<MqttString<'s>>,
+    pub reason_string: Option<MqttString<'s, S>>,
     /// The user property entries in the SUBACK/UNSUBACK packet.
     /// If the vector is full, this list might not be exhaustive.
-    pub user_properties: Vec<MqttStringPair<'s>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'s, S>, MAX_USER_PROPERTIES>,
 
     /// Reason code returned for the subscription.
     pub reason_code: ReasonCode,
@@ -224,9 +218,7 @@ pub struct Suback<'s, const MAX_USER_PROPERTIES: usize> {
 
 /// Content of [`Event::Publish`] or [`Event::Duplicate`]. In the latter case, it is **NOT** a valid
 /// application message and **MUST** be treated like it wasn't ever delivered by the client.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
+pub struct Publish<'p, S, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
 {
     /// The acknowledgement mode the client has determined with its given predicate to use for this
     /// publication flow. If this is the content of an [`Event::Duplicate`], this value is not the
@@ -252,7 +244,7 @@ pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER
     pub retain: bool,
 
     /// The exact topic of this publication.
-    pub topic: TopicName<'p>,
+    pub topic: TopicName<'p, S>,
 
     /// If present, indicates whether the payload is UTF-8. This value is set by the publisher and is
     /// NOT verified by the client library.
@@ -266,35 +258,33 @@ pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER
 
     /// Identifies an incoming publication as a request and specifies the topic which the response should
     /// be published on.
-    pub response_topic: Option<TopicName<'p>>,
+    pub response_topic: Option<TopicName<'p, S>>,
 
     /// Present in incoming requests and responses. In either case this is arbitrary binary data used for
     /// associating either the following response with this specific request or in case of a response,
     /// link back to the original request.
-    pub correlation_data: Option<MqttBinary<'p>>,
+    pub correlation_data: Option<MqttBinary<'p, S>>,
 
     /// The user property entries in the PUBLISH packet. If the vector is full, this list might not be
     /// exhaustive.
-    pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'p, S>, MAX_USER_PROPERTIES>,
 
     /// The subscription identifiers in the PUBLISH packet. If the vector is full, this list might not
     /// be exhaustive.
     pub subscription_identifiers: Vec<VarByteInt, MAX_SUBSCRIPTION_IDENTIFIERS>,
 
     /// The content type property of the PUBLISH packet
-    pub content_type: Option<MqttString<'p>>,
+    pub content_type: Option<MqttString<'p, S>>,
 
     /// The application message of this publication.
-    pub message: Bytes<'p>,
+    pub message: Bytes<'p, S>,
 }
 
 /// Content of [`Event::PublishAcknowledged`], [`Event::PublishReceived`],
 /// [`Event::PublishReleased`], and [`Event::PublishComplete`].
 ///
 /// The reason code is always successful.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Puback<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct Puback<'p, S, const MAX_USER_PROPERTIES: usize> {
     /// The acknowledgement mode that was configured at the time of
     /// publication (for outgoing publications) or the mode the client has
     /// determined with its given function (for incoming publications).
@@ -306,15 +296,15 @@ pub struct Puback<'p, const MAX_USER_PROPERTIES: usize> {
     /// Reason code of this state in the publication process
     pub reason_code: ReasonCode,
     /// The reason string of the PUBACK/PUBREC/PUBREL/PUBCOMP packet.
-    pub reason_string: Option<MqttString<'p>>,
+    pub reason_string: Option<MqttString<'p, S>>,
     /// The user property entries in the PUBACK/PUBREC/PUBREL/PUBCOMP packet.
     /// If the vector is full, this list might not be exhaustive.
-    pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'p, S>, MAX_USER_PROPERTIES>,
 }
 
-impl<'p, const MAX_USER_PROPERTIES: usize> Puback<'p, MAX_USER_PROPERTIES> {
+impl<'p, S, const MAX_USER_PROPERTIES: usize> Puback<'p, S, MAX_USER_PROPERTIES> {
     pub(crate) fn new<T>(
-        packet: GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>,
+        packet: GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>,
         ack_mode: AckMode,
     ) -> Self {
         debug_assert!(packet.reason_code.is_success());
@@ -336,24 +326,22 @@ impl<'p, const MAX_USER_PROPERTIES: usize> Puback<'p, MAX_USER_PROPERTIES> {
 /// Content of [`Event::PublishRejected`].
 ///
 /// The reason code is always erroneous.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Pubrej<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct Pubrej<'p, S, const MAX_USER_PROPERTIES: usize> {
     /// Packet identifier of the rejected PUBLISH packet.
     pub packet_identifier: PacketIdentifier,
     /// Reason code of the rejection.
     pub reason_code: ReasonCode,
     /// The reason string of the PUBACK/PUBREC/PUBREL/PUBCOMP packet.
-    pub reason_string: Option<MqttString<'p>>,
+    pub reason_string: Option<MqttString<'p, S>>,
     /// The user property entries in the PUBACK/PUBREC/PUBREL/PUBCOMP packet.
     /// If the vector is full, this list might not be exhaustive.
-    pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'p, S>, MAX_USER_PROPERTIES>,
 }
 
-impl<'p, T, const MAX_USER_PROPERTIES: usize> From<GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>>
-    for Pubrej<'p, MAX_USER_PROPERTIES>
+impl<'p, T, S, const MAX_USER_PROPERTIES: usize>
+    From<GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>> for Pubrej<'p, S, MAX_USER_PROPERTIES>
 {
-    fn from(packet: GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>) -> Self {
+    fn from(packet: GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>) -> Self {
         debug_assert!(packet.reason_code.is_erroneous());
 
         Self {
@@ -374,19 +362,17 @@ impl<'p, T, const MAX_USER_PROPERTIES: usize> From<GenericPubackPacket<'p, T, MA
 /// when calling [`Client::connect_enhanced`].
 ///
 /// [`Client::connect_enhanced`]: crate::client::Client::connect_enhanced
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Auth<'a, const MAX_USER_PROPERTIES: usize> {
+pub struct Auth<'a, S, const MAX_USER_PROPERTIES: usize> {
     /// Reason code of the AUTH packet. When this is [`ReasonCode::Success`],
     /// the authentication exchange is complete.
     pub reason_code: ReasonCode,
     /// The authentication data of the AUTH packet.
-    pub authentication_data: Option<MqttBinary<'a>>,
+    pub authentication_data: Option<MqttBinary<'a, S>>,
     /// The reason string of the AUTH packet.
-    pub reason_string: Option<MqttString<'a>>,
+    pub reason_string: Option<MqttString<'a, S>>,
     /// The user property entries in the AUTH packet.
     /// If the vector is full, this list might not be exhaustive.
-    pub user_properties: Vec<MqttStringPair<'a>, MAX_USER_PROPERTIES>,
+    pub user_properties: Vec<MqttStringPair<'a, S>, MAX_USER_PROPERTIES>,
 }
 
 mod partial {

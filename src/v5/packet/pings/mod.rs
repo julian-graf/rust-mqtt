@@ -25,8 +25,10 @@ pub type PingrespPacket = GenericPingPacket<Resp>;
 impl<T: PingPacketType> Packet for GenericPingPacket<T> {
     const PACKET_TYPE: PacketType = T::PACKET_TYPE;
 }
-impl<'p, T: PingPacketType> RxPacket<'p> for GenericPingPacket<T> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+impl<'p, R: Read, B: BufferProvider<'p>, T: PingPacketType> RxPacket<'p, R, B>
+    for GenericPingPacket<T>
+{
+    async fn receive(
         header: &FixedHeader,
         _: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {

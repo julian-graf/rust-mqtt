@@ -24,9 +24,7 @@ use crate::{
 /// [`Client`]: crate::client::Client
 /// [`Client::abort`]: crate::client::Client::abort
 /// [`Client::connect`]: crate::client::Client::connect
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Error<'e, const MAX_USER_PROPERTIES: usize, A = Infallible> {
+pub enum Error<'e, S, const MAX_USER_PROPERTIES: usize, A = Infallible> {
     /// An underlying Read/Write method returned an error.
     ///
     /// Unrecoverable error. [`Client::abort`] should be called.
@@ -62,15 +60,15 @@ pub enum Error<'e, const MAX_USER_PROPERTIES: usize, A = Infallible> {
 
         /// The reason string property of the causing CONNACK or DISCONNECT packet if the server included
         /// a reason string.
-        reason_string: Option<MqttString<'e>>,
+        reason_string: Option<MqttString<'e, S>>,
 
         /// The user property entries in the causing CONNACK or DISCONNECT packet. If the vector is full,
         /// this list might not be exhaustive.
-        user_properties: Vec<MqttStringPair<'e>, MAX_USER_PROPERTIES>,
+        user_properties: Vec<MqttStringPair<'e, S>, MAX_USER_PROPERTIES>,
 
         /// The server reference property of the causing CONNACK or DISCONNCET packet if the server included
         /// a server reference. Identifies another server which can be used.
-        server_reference: Option<MqttString<'e>>,
+        server_reference: Option<MqttString<'e, S>>,
     },
 
     /// An error occured in the [`AuthMechanism`] implementation or was detected by the [`AuthMechanism`]
@@ -273,7 +271,7 @@ pub enum Error<'e, const MAX_USER_PROPERTIES: usize, A = Infallible> {
     IllegalDisconnectSessionExpiryInterval,
 }
 
-impl<const MAX_USER_PROPERTIES: usize, A> Error<'_, MAX_USER_PROPERTIES, A> {
+impl<S, const MAX_USER_PROPERTIES: usize, A> Error<'_, S, MAX_USER_PROPERTIES, A> {
     /// Returns whether the client can recover from this error without closing the network connection.
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
@@ -297,14 +295,14 @@ impl<const MAX_USER_PROPERTIES: usize, A> Error<'_, MAX_USER_PROPERTIES, A> {
         )
     }
 }
-impl<'e, A> Error<'e, 0, A> {
+impl<'e, S, A> Error<'e, S, 0, A> {
     /// Converts an [`Error<0>`] into an [`Error<N>`] with any N.
     ///
     /// This cannot be a [`From`] implementation because `From<Error<0>> for Error<N>` would
     /// collide with the blanket implementation `From<T> for T`. The reason this function is
     /// only implemented for `MAX_USER_PROPERTIES` = 0 is to prevent potentially surprisng
     /// panics when converting from more user properties to less.
-    pub fn inflate<const MAX_USER_PROPERTIES: usize>(self) -> Error<'e, MAX_USER_PROPERTIES, A> {
+    pub fn inflate<const MAX_USER_PROPERTIES: usize>(self) -> Error<'e, S, MAX_USER_PROPERTIES, A> {
         match self {
             Self::Network(error_kind) => Error::Network(error_kind),
             Self::Server => Error::Server,
@@ -344,12 +342,12 @@ impl<'e, A> Error<'e, 0, A> {
         }
     }
 }
-impl<'e, const MAX_USER_PROPERTIES: usize> Error<'e, MAX_USER_PROPERTIES> {
+impl<'e, S, const MAX_USER_PROPERTIES: usize> Error<'e, S, MAX_USER_PROPERTIES> {
     /// Converts an [`Error<A = Infallible>`] into an [`Error<A>`] with any A.
     ///
     /// This cannot be a [`From`] implementation because `From<Error<A>> for Error<A>` would
     /// collide with the blanket implementation `From<T> for T`.
-    pub fn into_fallible<A>(self) -> Error<'e, MAX_USER_PROPERTIES, A> {
+    pub fn into_fallible<A>(self) -> Error<'e, S, MAX_USER_PROPERTIES, A> {
         match self {
             Self::Network(error_kind) => Error::Network(error_kind),
             Self::Server => Error::Server,
@@ -389,14 +387,16 @@ impl<'e, const MAX_USER_PROPERTIES: usize> Error<'e, MAX_USER_PROPERTIES> {
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize, A> From<Reserved> for Error<'_, MAX_USER_PROPERTIES, A> {
+impl<S, const MAX_USER_PROPERTIES: usize, A> From<Reserved>
+    for Error<'_, S, MAX_USER_PROPERTIES, A>
+{
     fn from(_: Reserved) -> Self {
         Self::Server
     }
 }
 
-impl<B, const MAX_USER_PROPERTIES: usize, A> From<RawError<B>>
-    for Error<'_, MAX_USER_PROPERTIES, A>
+impl<B, S, const MAX_USER_PROPERTIES: usize, A> From<RawError<B>>
+    for Error<'_, S, MAX_USER_PROPERTIES, A>
 {
     fn from(e: RawError<B>) -> Self {
         match e {
@@ -408,8 +408,8 @@ impl<B, const MAX_USER_PROPERTIES: usize, A> From<RawError<B>>
     }
 }
 
-impl<const MAX_USER_PROPERTIES: usize, A> From<TooLargeToEncode>
-    for Error<'_, MAX_USER_PROPERTIES, A>
+impl<S, const MAX_USER_PROPERTIES: usize, A> From<TooLargeToEncode>
+    for Error<'_, S, MAX_USER_PROPERTIES, A>
 {
     fn from(_: TooLargeToEncode) -> Self {
         Self::PacketMaximumLengthExceeded

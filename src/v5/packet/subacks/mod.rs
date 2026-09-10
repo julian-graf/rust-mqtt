@@ -21,37 +21,45 @@ use crate::{
 
 mod types;
 
-pub type SubackPacket<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> =
-    GenericSubackPacket<'p, Suback, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>;
-pub type UnsubackPacket<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> =
-    GenericSubackPacket<'p, Unsuback, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>;
+pub type SubackPacket<'p, S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> =
+    GenericSubackPacket<'p, Suback, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>;
+pub type UnsubackPacket<'p, S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> =
+    GenericSubackPacket<'p, Unsuback, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct GenericSubackPacket<
     'p,
     T,
+    S,
     const MAX_TOPIC_FILTERS: usize,
     const MAX_USER_PROPERTIES: usize,
 > {
     pub packet_identifier: PacketIdentifier,
 
-    pub reason_string: Option<ReasonString<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    pub reason_string: Option<ReasonString<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
 
     pub reason_codes: Vec<ReasonCode, MAX_TOPIC_FILTERS>,
     _phantom_data: PhantomData<&'p T>,
 }
 
-impl<T: SubackPacketType, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> Packet
-    for GenericSubackPacket<'_, T, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<T: SubackPacketType, S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
+    Packet for GenericSubackPacket<'_, T, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     const PACKET_TYPE: PacketType = T::PACKET_TYPE;
 }
-impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
-    RxPacket<'p> for GenericSubackPacket<'p, T, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<
+    'p,
+    R: Read,
+    B: BufferProvider<'p>,
+    T: SubackPacketType,
+    const MAX_TOPIC_FILTERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+> RxPacket<'p, R, B>
+    for GenericSubackPacket<'p, T, B::Buffer, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -87,7 +95,7 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PRO
             return Err(RxError::ProtocolError);
         }
 
-        let mut reason_string: Option<ReasonString<'_>> = None;
+        let mut reason_string: Option<ReasonString<'_, _>> = None;
         let mut user_properties = Vec::new();
 
         while properties_length > 0 {
@@ -124,7 +132,7 @@ impl<'p, T: SubackPacketType, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PRO
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    let len = UserProperty::skip(r).await?;
+                    let len = UserProperty::<B::Buffer>::skip(r).await?;
                     properties_length = properties_length
                         .checked_sub(len)
                         .ok_or(RxError::MalformedPacket)?;
@@ -242,7 +250,7 @@ mod unit {
                     0x3D, // remaining length
 
                     0x15, 0xF4, // packet identifier
-                    
+
                     0x39, // Property length
 
                     0x1F, 0x00, 0x0C, b'c', b'r', b'a', b'z', b'y', b' ', b't', b'h', b'i', b'n', b'g', b's',
@@ -350,8 +358,8 @@ mod unit {
                     0xB0,
                     0x0A,
 
-                    0xA3, 0xF4, 0x00, 
-                    
+                    0xA3, 0xF4, 0x00,
+
                     // Reason codes
                     0x00, 0x91, 0x11, 0x8F, 0x80, 0x87, 0x83,
                 ]
@@ -386,11 +394,11 @@ mod unit {
                 UnsubackPacket<1, 16>,
                 78,
                 [
-                    0xB0, 
+                    0xB0,
                     0x4E,
 
                     0x26, 0x1C,
-            
+
                     0x4A, // Property length
 
                     // Reason String

@@ -174,7 +174,7 @@ pub struct Client<
     raw: Raw<'c, N, B>,
 
     manual_ack_when:
-        &'c dyn Fn(&Publish<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>) -> bool,
+        &'c dyn Fn(&Publish<'_, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>) -> bool,
     reauth_state: ReAuthState,
 }
 
@@ -330,7 +330,7 @@ impl<
     pub fn ack_manually_when(
         &mut self,
         predicate: &'c dyn Fn(
-            &Publish<'_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+            &Publish<'_, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
         ) -> bool,
     ) {
         self.manual_ack_when = predicate;
@@ -384,7 +384,7 @@ impl<
         &mut self,
         options: &ConnectOptions<'_>,
         client_identifier: Option<MqttString<'_>>,
-    ) -> Result<(), MqttError<'c, 0, E>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0, E>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send CONNECT with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -446,7 +446,7 @@ impl<
             .map(MqttString::as_borrowed)
             .unwrap_or_default();
 
-        let mut packet = ConnectPacket::<MAX_USER_PROPERTIES>::new(
+        let mut packet = ConnectPacket::<_, MAX_USER_PROPERTIES>::new(
             packet_client_identifier,
             options.clean_start,
             options.keep_alive,
@@ -497,12 +497,15 @@ impl<
         &mut self,
         connack_header: FixedHeader,
         options: &ConnectOptions<'_>,
-        client_identifier: Option<MqttString<'d>>,
-    ) -> Result<Connected<'d, MAX_USER_PROPERTIES>, MqttError<'c, MAX_USER_PROPERTIES, E>>
+        client_identifier: Option<MqttString<'d, B::Buffer>>,
+    ) -> Result<
+        Connected<'d, B::Buffer, MAX_USER_PROPERTIES>,
+        MqttError<'c, B::Buffer, MAX_USER_PROPERTIES, E>,
+    >
     where
         'c: 'd,
     {
-        let ConnackPacket::<MAX_USER_PROPERTIES> {
+        let ConnackPacket::<_, MAX_USER_PROPERTIES> {
             session_present,
             reason_code,
             session_expiry_interval,
@@ -559,7 +562,9 @@ impl<
                     return Err(MqttError::Server);
                 };
 
-                if connect_authentication_method != &connack_authentication_method.into_inner() {
+                if connect_authentication_method
+                    != &connack_authentication_method.into_inner().as_borrowed()
+                {
                     error!(
                         "server sent an authentication method different from the required value"
                     );
@@ -706,8 +711,11 @@ impl<
         &mut self,
         net: N,
         options: &ConnectOptions<'_>,
-        client_identifier: Option<MqttString<'d>>,
-    ) -> Result<Connected<'d, MAX_USER_PROPERTIES>, MqttError<'c, MAX_USER_PROPERTIES>>
+        client_identifier: Option<MqttString<'d, B::Buffer>>,
+    ) -> Result<
+        Connected<'d, B::Buffer, MAX_USER_PROPERTIES>,
+        MqttError<'c, B::Buffer, MAX_USER_PROPERTIES>,
+    >
     where
         'c: 'd,
     {
@@ -727,7 +735,7 @@ impl<
         let header = self.raw.recv_header().await?;
 
         match header.packet_type() {
-            Ok(ConnackPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => {
+            Ok(ConnackPacket::<&[u8], MAX_USER_PROPERTIES>::PACKET_TYPE) => {
                 debug!(
                     "received CONNACK packet header (remaining length: {})",
                     header.remaining_len.value()
@@ -819,10 +827,13 @@ impl<
         &mut self,
         net: N,
         options: &ConnectOptions<'_>,
-        client_identifier: Option<MqttString<'d>>,
+        client_identifier: Option<MqttString<'d, B::Buffer>>,
         authentication_method: MqttString<'a>,
         mechanism: &mut A,
-    ) -> Result<Connected<'d, MAX_USER_PROPERTIES>, MqttError<'c, MAX_USER_PROPERTIES, A::Error>>
+    ) -> Result<
+        Connected<'d, B::Buffer, MAX_USER_PROPERTIES>,
+        MqttError<'c, B::Buffer, MAX_USER_PROPERTIES, A::Error>,
+    >
     where
         A: AuthMechanism<MAX_USER_PROPERTIES>,
         'c: 'd,
@@ -844,14 +855,14 @@ impl<
             let header = self.raw.recv_header().await?;
 
             match header.packet_type() {
-                Ok(ConnackPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => {
+                Ok(ConnackPacket::<&[u8], MAX_USER_PROPERTIES>::PACKET_TYPE) => {
                     debug!(
                         "received CONNACK packet header (remaining length: {})",
                         header.remaining_len.value()
                     );
                     break header;
                 }
-                Ok(AuthPacket::<MAX_USER_PROPERTIES>::PACKET_TYPE) => debug!(
+                Ok(AuthPacket::<&[u8], MAX_USER_PROPERTIES>::PACKET_TYPE) => debug!(
                     "received AUTH packet header (remaining length: {})",
                     header.remaining_len.value()
                 ),
@@ -867,7 +878,7 @@ impl<
                 }
             }
 
-            let AuthPacket::<MAX_USER_PROPERTIES> {
+            let AuthPacket::<B::Buffer, MAX_USER_PROPERTIES> {
                 reason_code,
                 authentication_method,
                 authentication_data,
@@ -891,7 +902,7 @@ impl<
                 return Err(MqttError::Server);
             }
 
-            if &authentication_method.into_inner()
+            if &authentication_method.into_inner().as_borrowed()
                 != self.client_config.authentication_method.as_ref().unwrap()
             {
                 error!("server sent an authentication method different from the required value");
@@ -899,7 +910,7 @@ impl<
                 return Err(MqttError::Server);
             }
 
-            let event = Auth::<MAX_USER_PROPERTIES> {
+            let event = Auth::<_, MAX_USER_PROPERTIES> {
                 reason_code,
                 authentication_data: authentication_data.map(Property::into_inner),
                 reason_string: reason_string.map(Property::into_inner),
@@ -909,7 +920,7 @@ impl<
                     .collect(),
             };
 
-            let AuthOptions::<MAX_USER_PROPERTIES> {
+            let AuthOptions::<_, MAX_USER_PROPERTIES> {
                 authentication_data,
                 reason_string,
                 user_properties,
@@ -949,7 +960,7 @@ impl<
                 }
             };
 
-            let packet = AuthPacket::<MAX_USER_PROPERTIES>::new(
+            let packet = AuthPacket::<&[u8], MAX_USER_PROPERTIES>::new(
                 ReasonCode::ContinueAuthentication,
                 self.client_config
                     .authentication_method
@@ -957,9 +968,19 @@ impl<
                     .unwrap()
                     .as_borrowed()
                     .into(),
-                authentication_data.map(Into::into),
-                reason_string.map(Into::into),
-                user_properties.into_iter().map(Into::into).collect(),
+                authentication_data
+                    .as_ref()
+                    .map(MqttBinary::as_borrowed)
+                    .map(Into::into),
+                reason_string
+                    .as_ref()
+                    .map(MqttString::as_borrowed)
+                    .map(Into::into),
+                user_properties
+                    .iter()
+                    .map(MqttStringPair::as_borrowed)
+                    .map(Into::into)
+                    .collect(),
             );
 
             debug!("sending AUTH packet");
@@ -972,7 +993,7 @@ impl<
             .complete_connect(header, options, client_identifier)
             .await?;
 
-        if let Err((e, reason_code)) = mechanism.success(&Auth::<MAX_USER_PROPERTIES> {
+        if let Err((e, reason_code)) = mechanism.success(&Auth::<_, MAX_USER_PROPERTIES> {
             reason_code: ReasonCode::Success,
             authentication_data: c.authentication_data.as_ref().map(MqttBinary::as_borrowed),
             reason_string: None,
@@ -1004,7 +1025,7 @@ impl<
     ///
     /// * [`MqttError::RecoveryRequired`] if an unrecoverable error occured previously
     /// * [`MqttError::Network`] if the underlying [`Transport`] returned an error
-    pub async fn ping(&mut self) -> Result<(), MqttError<'c, 0>> {
+    pub async fn ping(&mut self) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         debug!("sending PINGREQ packet");
 
         // PINGREQ has length 2 which really shouldn't exceed server's max packet size.
@@ -1059,7 +1080,7 @@ impl<
         &mut self,
         topic_filter: TopicFilter<'_>,
         options: &SubscriptionOptions<'_>,
-    ) -> Result<PacketIdentifier, MqttError<'c, 0>> {
+    ) -> Result<PacketIdentifier, MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send SUBSCRIBE with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1096,7 +1117,7 @@ impl<
             MqttError::SessionBuffer
         })?;
 
-        let packet = SubscribePacket::<1, MAX_USER_PROPERTIES>::new(
+        let packet = SubscribePacket::<&[u8], 1, MAX_USER_PROPERTIES>::new(
             pid,
             options.subscription_identifier.map(Into::into),
             options
@@ -1146,7 +1167,7 @@ impl<
         &mut self,
         topic_filter: TopicFilter<'_>,
         options: &UnsubscriptionOptions<'_>,
-    ) -> Result<PacketIdentifier, MqttError<'c, 0>> {
+    ) -> Result<PacketIdentifier, MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send UNSUBSCRIBE with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1166,7 +1187,7 @@ impl<
         })?;
 
         let topic_filters = [topic_filter].into();
-        let packet = UnsubscribePacket::<1, MAX_USER_PROPERTIES>::new(
+        let packet = UnsubscribePacket::<&[u8], 1, MAX_USER_PROPERTIES>::new(
             pid,
             options
                 .user_properties
@@ -1239,7 +1260,7 @@ impl<
         &mut self,
         options: &PublicationOptions<'_>,
         message: Bytes<'_>,
-    ) -> Result<Option<PacketIdentifier>, MqttError<'c, 0>> {
+    ) -> Result<Option<PacketIdentifier>, MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to publish {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1295,7 +1316,7 @@ impl<
             (IdentifiedQoS::AtMostOnce, None)
         };
 
-        let packet = PublishPacket::<0, MAX_USER_PROPERTIES>::new(
+        let packet = PublishPacket::<&[u8], 0, MAX_USER_PROPERTIES>::new(
             false,
             identified_qos,
             options.retain,
@@ -1408,7 +1429,7 @@ impl<
         packet_identifier: PacketIdentifier,
         options: &PublicationOptions<'_>,
         message: Bytes<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to publish {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1445,7 +1466,7 @@ impl<
             QoS::ExactlyOnce => IdentifiedQoS::ExactlyOnce(packet_identifier),
         };
 
-        let packet = PublishPacket::<0, MAX_USER_PROPERTIES>::new(
+        let packet = PublishPacket::<&[u8], 0, MAX_USER_PROPERTIES>::new(
             true,
             identified_qos,
             options.retain,
@@ -1514,7 +1535,7 @@ impl<
     ///
     /// * [`MqttError::RecoveryRequired`] if an unrecoverable error occured previously
     /// * [`MqttError::Network`] if the underlying [`Transport`] returned an error
-    pub async fn rerelease(&mut self) -> Result<(), MqttError<'c, 0>> {
+    pub async fn rerelease(&mut self) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         let Some(mut handle) = self.session.outbound_iter() else {
             return Ok(());
         };
@@ -1523,8 +1544,10 @@ impl<
             if handle.state == LocalPublishState::DueRel(AckMode::Automatic) {
                 handle.outbound_pubrel().unwrap();
 
-                let pubrel =
-                    PubrelPacket::<0>::minimal(handle.packet_identifier(), ReasonCode::Success);
+                let pubrel = PubrelPacket::<&[u8], 0>::minimal(
+                    handle.packet_identifier(),
+                    ReasonCode::Success,
+                );
 
                 debug!("sending PUBREL packet {}", pubrel.packet_identifier);
 
@@ -1577,7 +1600,7 @@ impl<
         packet_identifier: PacketIdentifier,
         reason_code: ReasonCode,
         options: &AckOptions<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send PUBACK with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1601,7 +1624,7 @@ impl<
             return Err(MqttError::IllegalReasonCode);
         }
 
-        let packet = PubackPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = PubackPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             packet_identifier,
             reason_code,
             options
@@ -1672,7 +1695,7 @@ impl<
         packet_identifier: PacketIdentifier,
         reason_code: ReasonCode,
         options: &AckOptions<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send PUBREC with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -1696,7 +1719,7 @@ impl<
             return Err(MqttError::IllegalReasonCode);
         }
 
-        let packet = PubrecPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = PubrecPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             packet_identifier,
             reason_code,
             options
@@ -1762,7 +1785,7 @@ impl<
         &mut self,
         packet_identifier: PacketIdentifier,
         options: &AckOptions<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         const REASON_CODE: ReasonCode = ReasonCode::Success;
 
         assert!(
@@ -1772,7 +1795,7 @@ impl<
             MAX_USER_PROPERTIES
         );
 
-        let packet = PubrelPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = PubrelPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             packet_identifier,
             REASON_CODE,
             options
@@ -1837,7 +1860,7 @@ impl<
         &mut self,
         packet_identifier: PacketIdentifier,
         options: &AckOptions<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         const REASON_CODE: ReasonCode = ReasonCode::Success;
 
         assert!(
@@ -1847,7 +1870,7 @@ impl<
             MAX_USER_PROPERTIES
         );
 
-        let packet = PubcompPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = PubcompPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             packet_identifier,
             REASON_CODE,
             options
@@ -1916,7 +1939,7 @@ impl<
     pub async fn reauthenticate(
         &mut self,
         options: &ReAuthOptions<'_>,
-    ) -> Result<(), MqttError<'c, 0>> {
+    ) -> Result<(), MqttError<'c, B::Buffer, 0>> {
         let Some(authentication_method) = self
             .client_config
             .authentication_method
@@ -1934,7 +1957,7 @@ impl<
             ReAuthState::DueAuth => ReasonCode::ContinueAuthentication,
         };
 
-        let packet = AuthPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = AuthPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             reason_code,
             authentication_method.into(),
             options
@@ -2051,7 +2074,7 @@ impl<
     pub async fn disconnect(
         &mut self,
         options: &DisconnectOptions<'_>,
-    ) -> Result<N, MqttError<'c, 0>> {
+    ) -> Result<N, MqttError<'c, B::Buffer, 0>> {
         assert!(
             options.user_properties.len() <= MAX_USER_PROPERTIES,
             "attempted to send DISCONNECT with {} > {} (MAX_USER_PROPERTIES) properties",
@@ -2107,7 +2130,7 @@ impl<
             return Err(MqttError::IllegalDisconnectSessionExpiryInterval);
         }
 
-        let packet = DisconnectPacket::<MAX_USER_PROPERTIES>::new(
+        let packet = DisconnectPacket::<&[u8], MAX_USER_PROPERTIES>::new(
             options.reason_code,
             options.session_expiry_interval,
             options
@@ -2157,8 +2180,8 @@ impl<
     pub async fn poll(
         &mut self,
     ) -> Result<
-        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
-        MqttError<'c, MAX_USER_PROPERTIES>,
+        Event<'c, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+        MqttError<'c, B::Buffer, MAX_USER_PROPERTIES>,
     > {
         let header = self.poll_header().await.map_err(MqttError::inflate)?;
         self.poll_body(header).await
@@ -2182,7 +2205,7 @@ impl<
     /// * [`MqttError::Server`] if:
     ///   * the server sends a malformed packet header
     ///   * the packet following this header exceeds the client's maximum packet size
-    pub async fn poll_header(&mut self) -> Result<FixedHeader, MqttError<'c, 0>> {
+    pub async fn poll_header(&mut self) -> Result<FixedHeader, MqttError<'c, B::Buffer, 0>> {
         let header = self.raw.recv_header().await?;
 
         if let Ok(p) = header.packet_type() {
@@ -2362,8 +2385,8 @@ impl<
         &mut self,
         header: FixedHeader,
     ) -> Result<
-        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
-        MqttError<'c, MAX_USER_PROPERTIES>,
+        Event<'c, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+        MqttError<'c, B::Buffer, MAX_USER_PROPERTIES>,
     > {
         let event = match header.packet_type()? {
             PacketType::Pingresp => {
@@ -2376,7 +2399,7 @@ impl<
                 //    with RxError::Protocol error. This is correct as long as we only send SUBSCRIBE packets with 1 topic.
                 let suback = self
                     .raw
-                    .recv_body::<SubackPacket<1, MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<SubackPacket<B::Buffer, 1, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2422,7 +2445,7 @@ impl<
                 //    with RxError::Protocol error. This is correct as long as we only send UNSUBSCRIBE packets with 1 topic.
                 let unsuback = self
                     .raw
-                    .recv_body::<UnsubackPacket<1, MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<UnsubackPacket<B::Buffer, 1, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2465,7 +2488,7 @@ impl<
             PacketType::Publish => {
                 let publish = self
                     .raw
-                    .recv_body::<PublishPacket<MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>>(
+                    .recv_body::<PublishPacket<B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>>(
                         &header,
                     )
                     .await?;
@@ -2525,7 +2548,7 @@ impl<
 
                     Response::None => {}
                     Response::Acknowledge(reason_code) => {
-                        let puback = PubackPacket::<0>::minimal(
+                        let puback = PubackPacket::<&[u8], 0>::minimal(
                             publish.identified_qos.packet_identifier().unwrap(),
                             reason_code,
                         );
@@ -2538,7 +2561,7 @@ impl<
                         self.raw.flush().await?;
                     }
                     Response::Receive(reason_code) => {
-                        let pubrec = PubrecPacket::<0>::minimal(
+                        let pubrec = PubrecPacket::<&[u8], 0>::minimal(
                             publish.identified_qos.packet_identifier().unwrap(),
                             reason_code,
                         );
@@ -2579,7 +2602,7 @@ impl<
             PacketType::Puback => {
                 let puback = self
                     .raw
-                    .recv_body::<PubackPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<PubackPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2628,7 +2651,7 @@ impl<
             PacketType::Pubrec => {
                 let pubrec = self
                     .raw
-                    .recv_body::<PubrecPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<PubrecPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2652,8 +2675,10 @@ impl<
 
                     Response::None => {}
                     Response::Release(reason_code) => {
-                        let pubrel =
-                            PubrelPacket::<0>::minimal(pubrec.packet_identifier, reason_code);
+                        let pubrel = PubrelPacket::<&[u8], 0>::minimal(
+                            pubrec.packet_identifier,
+                            reason_code,
+                        );
 
                         debug!("sending PUBREL packet {}", pubrel.packet_identifier);
 
@@ -2686,7 +2711,7 @@ impl<
             PacketType::Pubrel => {
                 let pubrel = self
                     .raw
-                    .recv_body::<PubrelPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<PubrelPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2710,8 +2735,10 @@ impl<
 
                     Response::None => {}
                     Response::Complete(reason_code) => {
-                        let pubcomp =
-                            PubcompPacket::<0>::minimal(pubrel.packet_identifier, reason_code);
+                        let pubcomp = PubcompPacket::<&[u8], 0>::minimal(
+                            pubrel.packet_identifier,
+                            reason_code,
+                        );
 
                         debug!("sending PUBCOMP packet {}", pubcomp.packet_identifier);
 
@@ -2744,7 +2771,7 @@ impl<
             PacketType::Pubcomp => {
                 let pubcomp = self
                     .raw
-                    .recv_body::<PubcompPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<PubcompPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 if !self.client_config.request_problem_information
@@ -2793,7 +2820,7 @@ impl<
             PacketType::Disconnect => {
                 let disconnect = self
                     .raw
-                    .recv_body::<DisconnectPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<DisconnectPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 // The server initiated the disconnect. We must close the transport on our side
@@ -2841,7 +2868,7 @@ impl<
 
                 let auth = self
                     .raw
-                    .recv_body::<AuthPacket<MAX_USER_PROPERTIES>>(&header)
+                    .recv_body::<AuthPacket<B::Buffer, MAX_USER_PROPERTIES>>(&header)
                     .await?;
 
                 // Must be a match statement instead of a match expression because

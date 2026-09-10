@@ -17,22 +17,24 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct AuthPacket<'p, const MAX_USER_PROPERTIES: usize> {
+pub struct AuthPacket<'p, S, const MAX_USER_PROPERTIES: usize> {
     pub reason_code: ReasonCode,
 
-    pub authentication_method: AuthenticationMethod<'p>,
-    pub authentication_data: Option<AuthenticationData<'p>>,
-    pub reason_string: Option<ReasonString<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    pub authentication_method: AuthenticationMethod<'p, S>,
+    pub authentication_data: Option<AuthenticationData<'p, S>>,
+    pub reason_string: Option<ReasonString<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
 }
 
-impl<const MAX_USER_PROPERTIES: usize> Packet for AuthPacket<'_, MAX_USER_PROPERTIES> {
+impl<S, const MAX_USER_PROPERTIES: usize> Packet for AuthPacket<'_, S, MAX_USER_PROPERTIES> {
     const PACKET_TYPE: PacketType = PacketType::Auth;
 }
-impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p> for AuthPacket<'p, MAX_USER_PROPERTIES> {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+impl<'p, R: Read, B: BufferProvider<'p>, const MAX_USER_PROPERTIES: usize> RxPacket<'p, R, B>
+    for AuthPacket<'p, B::Buffer, MAX_USER_PROPERTIES>
+{
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -102,7 +104,7 @@ impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p> for AuthPacket<'p, MAX_U
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    UserProperty::skip(r).await?;
+                    UserProperty::<B::Buffer>::skip(r).await?;
                 }
                 // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>
                 p => {
@@ -126,7 +128,9 @@ impl<'p, const MAX_USER_PROPERTIES: usize> RxPacket<'p> for AuthPacket<'p, MAX_U
         })
     }
 }
-impl<const MAX_USER_PROPERTIES: usize> TxPacket for AuthPacket<'_, MAX_USER_PROPERTIES> {
+impl<S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> TxPacket
+    for AuthPacket<'_, S, MAX_USER_PROPERTIES>
+{
     async fn send<W: Write>(&self, write: &mut W) -> Result<(), TxError<W::Error>> {
         FixedHeader::new(Self::PACKET_TYPE, 0x00, self.remaining_len())
             .write(write)
@@ -165,13 +169,13 @@ impl<const MAX_USER_PROPERTIES: usize> TxPacket for AuthPacket<'_, MAX_USER_PROP
     }
 }
 
-impl<'p, const MAX_USER_PROPERTIES: usize> AuthPacket<'p, MAX_USER_PROPERTIES> {
+impl<'p, S, const MAX_USER_PROPERTIES: usize> AuthPacket<'p, S, MAX_USER_PROPERTIES> {
     pub const fn new(
         reason_code: ReasonCode,
-        authentication_method: AuthenticationMethod<'p>,
-        authentication_data: Option<AuthenticationData<'p>>,
-        reason_string: Option<ReasonString<'p>>,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        authentication_method: AuthenticationMethod<'p, S>,
+        authentication_data: Option<AuthenticationData<'p, S>>,
+        reason_string: Option<ReasonString<'p, S>>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     ) -> Self {
         const {
             const_assert!(MAX_USER_PROPERTIES <= 2046);
@@ -185,7 +189,9 @@ impl<'p, const MAX_USER_PROPERTIES: usize> AuthPacket<'p, MAX_USER_PROPERTIES> {
             user_properties,
         }
     }
+}
 
+impl<'p, S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> AuthPacket<'p, S, MAX_USER_PROPERTIES> {
     fn properties_length(&self) -> VarByteInt {
         let len = self.authentication_method.written_len()
             + self.authentication_data.written_len()

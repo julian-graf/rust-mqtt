@@ -9,23 +9,28 @@ use crate::{
     v5::property::UserProperty,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct UnsubscribePacket<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> {
+pub struct UnsubscribePacket<
+    'p,
+    S,
+    const MAX_TOPIC_FILTERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+> {
     packet_identifier: PacketIdentifier,
 
-    user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
 
-    topic_filters: Vec<TopicFilter<'p>, MAX_TOPIC_FILTERS>,
+    topic_filters: Vec<TopicFilter<'p, S>, MAX_TOPIC_FILTERS>,
 }
 
-impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> Packet
-    for UnsubscribePacket<'_, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<S, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> Packet
+    for UnsubscribePacket<'_, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     const PACKET_TYPE: PacketType = PacketType::Unsubscribe;
 }
-impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
-    for UnsubscribePacket<'_, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<S: AsRef<[u8]>, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
+    for UnsubscribePacket<'_, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     fn remaining_len(&self) -> VarByteInt {
         // Safety: UNSUBSCRIBE packets that are too long to encode cannot be created
@@ -52,15 +57,15 @@ impl<const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize> TxPacket
     }
 }
 
-impl<'p, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
-    UnsubscribePacket<'p, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
+impl<'p, S: AsRef<[u8]>, const MAX_TOPIC_FILTERS: usize, const MAX_USER_PROPERTIES: usize>
+    UnsubscribePacket<'p, S, MAX_TOPIC_FILTERS, MAX_USER_PROPERTIES>
 {
     /// If `MAX_TOPIC_FILTERS` is to less than or equal to 2053 and `MAX_USER_PROPERTIES` is
     /// less than or equal to 1021, it is guaranteed that `TooLargeToEncode` is never returned.
     pub fn new(
         packet_identifier: PacketIdentifier,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
-        topic_filters: Vec<TopicFilter<'p>, MAX_TOPIC_FILTERS>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
+        topic_filters: Vec<TopicFilter<'p, S>, MAX_TOPIC_FILTERS>,
     ) -> Result<Self, TooLargeToEncode> {
         let p = Self {
             packet_identifier,

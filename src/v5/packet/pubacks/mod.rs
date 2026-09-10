@@ -25,35 +25,35 @@ use crate::{
 
 mod types;
 
-pub type PubackPacket<'p, const MAX_USER_PROPERTIES: usize> =
-    GenericPubackPacket<'p, Ack, MAX_USER_PROPERTIES>;
-pub type PubrecPacket<'p, const MAX_USER_PROPERTIES: usize> =
-    GenericPubackPacket<'p, Rec, MAX_USER_PROPERTIES>;
-pub type PubrelPacket<'p, const MAX_USER_PROPERTIES: usize> =
-    GenericPubackPacket<'p, Rel, MAX_USER_PROPERTIES>;
-pub type PubcompPacket<'p, const MAX_USER_PROPERTIES: usize> =
-    GenericPubackPacket<'p, Comp, MAX_USER_PROPERTIES>;
+pub type PubackPacket<'p, S, const MAX_USER_PROPERTIES: usize> =
+    GenericPubackPacket<'p, Ack, S, MAX_USER_PROPERTIES>;
+pub type PubrecPacket<'p, S, const MAX_USER_PROPERTIES: usize> =
+    GenericPubackPacket<'p, Rec, S, MAX_USER_PROPERTIES>;
+pub type PubrelPacket<'p, S, const MAX_USER_PROPERTIES: usize> =
+    GenericPubackPacket<'p, Rel, S, MAX_USER_PROPERTIES>;
+pub type PubcompPacket<'p, S, const MAX_USER_PROPERTIES: usize> =
+    GenericPubackPacket<'p, Comp, S, MAX_USER_PROPERTIES>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct GenericPubackPacket<'p, T, const MAX_USER_PROPERTIES: usize> {
+pub struct GenericPubackPacket<'p, T, S, const MAX_USER_PROPERTIES: usize> {
     pub packet_identifier: PacketIdentifier,
     pub reason_code: ReasonCode,
 
-    pub reason_string: Option<ReasonString<'p>>,
-    pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+    pub reason_string: Option<ReasonString<'p, S>>,
+    pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     _phantom_data: PhantomData<&'p T>,
 }
 
-impl<T: PubackPacketType, const MAX_USER_PROPERTIES: usize> Packet
-    for GenericPubackPacket<'_, T, MAX_USER_PROPERTIES>
+impl<T: PubackPacketType, S, const MAX_USER_PROPERTIES: usize> Packet
+    for GenericPubackPacket<'_, T, S, MAX_USER_PROPERTIES>
 {
     const PACKET_TYPE: PacketType = T::PACKET_TYPE;
 }
-impl<'p, T: PubackPacketType, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
-    for GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>
+impl<'p, R: Read, B: BufferProvider<'p>, T: PubackPacketType, const MAX_USER_PROPERTIES: usize>
+    RxPacket<'p, R, B> for GenericPubackPacket<'p, T, B::Buffer, MAX_USER_PROPERTIES>
 {
-    async fn receive<R: Read, B: BufferProvider<'p>>(
+    async fn receive(
         header: &FixedHeader,
         mut reader: BodyReader<'_, 'p, R, B>,
     ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -126,7 +126,7 @@ impl<'p, T: PubackPacketType, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
                     unsafe { user_properties.push_unchecked(user_property) };
                 }
                 PropertyType::UserProperty => {
-                    UserProperty::skip(r).await?;
+                    UserProperty::<B::Buffer>::skip(r).await?;
                 }
                 p => {
                     // Malformed packet according to <https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901029>
@@ -145,8 +145,8 @@ impl<'p, T: PubackPacketType, const MAX_USER_PROPERTIES: usize> RxPacket<'p>
         })
     }
 }
-impl<T: PubackPacketType, const MAX_USER_PROPERTIES: usize> TxPacket
-    for GenericPubackPacket<'_, T, MAX_USER_PROPERTIES>
+impl<T: PubackPacketType, S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize> TxPacket
+    for GenericPubackPacket<'_, T, S, MAX_USER_PROPERTIES>
 {
     fn remaining_len(&self) -> VarByteInt {
         let variable_header_length = self.packet_identifier.written_len() + wlen!(ReasonCode);
@@ -187,14 +187,14 @@ impl<T: PubackPacketType, const MAX_USER_PROPERTIES: usize> TxPacket
     }
 }
 
-impl<'p, T: PubackPacketType, const MAX_USER_PROPERTIES: usize>
-    GenericPubackPacket<'p, T, MAX_USER_PROPERTIES>
+impl<'p, T: PubackPacketType, S, const MAX_USER_PROPERTIES: usize>
+    GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>
 {
     pub const fn new(
         packet_identifier: PacketIdentifier,
         reason_code: ReasonCode,
-        reason_string: Option<ReasonString<'p>>,
-        user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        reason_string: Option<ReasonString<'p, S>>,
+        user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
     ) -> Self {
         const {
             const_assert!(MAX_USER_PROPERTIES <= 2047);
@@ -212,7 +212,11 @@ impl<'p, T: PubackPacketType, const MAX_USER_PROPERTIES: usize>
     pub const fn minimal(packet_identifier: PacketIdentifier, reason_code: ReasonCode) -> Self {
         Self::new(packet_identifier, reason_code, None, Vec::new())
     }
+}
 
+impl<'p, T: PubackPacketType, S: AsRef<[u8]>, const MAX_USER_PROPERTIES: usize>
+    GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>
+{
     fn properties_length(&self) -> VarByteInt {
         let len = self.reason_string.written_len()
             + self
