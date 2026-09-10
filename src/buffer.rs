@@ -4,7 +4,14 @@
 pub use alloc::AllocBuffer;
 
 #[cfg(feature = "bump")]
-pub use bump::{BumpBuffer, InsufficientSpace};
+pub use bump::BumpBuffer;
+
+pub use atomic_bump::{ArcBuffer, ArcBumpBuffer};
+
+/// Error returned when a bump buffer's underlying buffer does not have enough unallocated space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct InsufficientSpace;
 
 /// A trait to describe anything that can allocate memory.
 ///
@@ -40,12 +47,7 @@ pub trait BufferProvider<'a> {
 mod bump {
     use core::{marker::PhantomData, slice};
 
-    use crate::buffer::BufferProvider;
-
-    /// Error returned when the [`BumpBuffer`]'s underlying buffer does not have enough unallocated space.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-    pub struct InsufficientSpace;
+    use crate::buffer::{BufferProvider, InsufficientSpace};
 
     /// Allocates memory from an underlying buffer by bumping up a pointer by the requested length.
     ///
@@ -246,6 +248,206 @@ mod bump {
                 // Checking the slices for equality is UB because we have not upheld the rules of
                 // `BumpBuffer::reset` and it subsequently causes aliasing.
                 // assert_eq!(s1, s2);
+
+                assert_eq!(s1, s2.as_ptr());
+            }
+
+            assert_eq!(backing, [11, 12, 13, 0, 0, 0]);
+        }
+    }
+}
+
+mod atomic_bump {
+    use core::{
+        marker::PhantomData,
+        slice,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::buffer::{BufferProvider, InsufficientSpace};
+
+    /// Atomically reference counted bump buffer.
+    /// Allocates memory from an underlying buffer by bumping up a pointer by the requested length
+    /// and incrementing a reference counter atomically. Every allocation decrements the counter
+    /// again on [`Drop`]. This allows the bump buffer to reset back to the start of the underlying
+    /// buffer when no more allocations from the buffer are live.
+    #[derive(Debug)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    pub struct ArcBumpBuffer<'a> {
+        ptr: *mut u8,
+        len: usize,
+        index: usize,
+        active: &'a AtomicUsize,
+        _phantom_data: PhantomData<&'a mut [u8]>,
+    }
+
+    /// The allocation from a [`ArcBumpBuffer`]. Decrements the allocation counter of the bump
+    /// buffer on [`Drop`].
+    #[derive(Debug)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    pub struct ArcBuffer<'a> {
+        buffer: &'a mut [u8],
+        handle: &'a AtomicUsize,
+    }
+
+    unsafe impl Send for ArcBuffer<'static> {}
+    unsafe impl Sync for ArcBuffer<'static> {}
+
+    impl<'a> Drop for ArcBuffer<'a> {
+        fn drop(&mut self) {
+            self.handle.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    impl<'a> AsMut<[u8]> for ArcBuffer<'a> {
+        fn as_mut(&mut self) -> &mut [u8] {
+            self.buffer
+        }
+    }
+    impl<'a> AsRef<[u8]> for ArcBuffer<'a> {
+        fn as_ref(&self) -> &[u8] {
+            self.buffer
+        }
+    }
+
+    impl<'a> BufferProvider<'a> for ArcBumpBuffer<'a> {
+        type Buffer = ArcBuffer<'a>;
+        type BufferMut = ArcBuffer<'a>;
+
+        type ProvisionError = InsufficientSpace;
+
+        /// Return the next `len` bytes from the buffer, advancing the internal tracking
+        /// index and incrementing the reference counter. Returns [`InsufficientSpace`]
+        /// if there isn't enough room.
+        fn provide_buffer(&mut self, len: usize) -> Result<Self::BufferMut, Self::ProvisionError> {
+            if self.active.load(Ordering::Acquire) == 0 {
+                self.index = 0;
+            }
+
+            if self.remaining_len() < len {
+                Err(InsufficientSpace)
+            } else {
+                let start = self.index;
+
+                // Safety: we checked the bounds above meaning the resulting pointer
+                // is in the backing slice's range. This means the pointer arithmetic
+                // does not overflow.
+                // The pointer originates from the backing slice owned by this struct
+                // with the same lifetime.
+                // If we reset into a previously used part of the backing slice, the
+                // atomic store with `Ordering::Release` establishes establishes a
+                // happens-before relationship with the atomic load with
+                // `Ordering::Acquire` in this function. This means that no references
+                // exist anymore and no memory operations from before the reset will
+                // overlap with this `provide_buffer` call.
+                let ptr = unsafe { self.ptr.add(start) };
+
+                self.index += len;
+
+                self.active.fetch_add(1, Ordering::Relaxed);
+
+                // Safety: the slice starts at the self.index offset which is not part of any previous reservation.
+                // Everything after this offset is not allocated and referenced.
+                // The lifetime is correct as the returned slice has the same lifetime as `Self` which is
+                // in turn has the lifetime of the backing slice.
+                let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
+
+                Ok(ArcBuffer {
+                    buffer: slice,
+                    handle: self.active,
+                })
+            }
+        }
+    }
+
+    impl<'a> ArcBumpBuffer<'a> {
+        /// Creates a new [`ArcBumpBuffer`] with the provided slice as underlying buffer.
+        /// Requires a mutable reference to the atomic variable to guarantee exclusive
+        /// access for a sound API.
+        #[must_use]
+        pub fn new(slice: &'a mut [u8], counter: &'a mut AtomicUsize) -> Self {
+            counter.store(0, Ordering::Relaxed);
+
+            Self {
+                ptr: slice.as_mut_ptr(),
+                len: slice.len(),
+                index: 0,
+                active: counter,
+                _phantom_data: PhantomData,
+            }
+        }
+
+        /// Returns the remaining amount of unallocated bytes in the underlying buffer.
+        #[inline]
+        #[must_use]
+        pub fn remaining_len(&self) -> usize {
+            self.len - self.index
+        }
+    }
+
+    fn _assert_covariant<'a, 'b: 'a>(x: ArcBumpBuffer<'b>) -> ArcBumpBuffer<'a> {
+        x
+    }
+
+    #[cfg(test)]
+    mod unit {
+        use tokio_test::{assert_err, assert_ok};
+
+        use super::*;
+
+        #[test]
+        fn provide_buffer_and_remaining_len() {
+            let mut backing = [0; 10];
+            let mut counter = AtomicUsize::new(0);
+
+            {
+                let mut buf = ArcBumpBuffer::new(&mut backing, &mut counter);
+
+                assert_eq!(buf.remaining_len(), 10);
+
+                let mut s1 = assert_ok!(buf.provide_buffer(4));
+                let s1 = s1.as_mut();
+                assert_eq!(s1.len(), 4);
+
+                s1.copy_from_slice(&[1, 2, 3, 4]);
+                assert_eq!(buf.remaining_len(), 6);
+
+                // take remaining 6 bytes
+                let mut s2 = assert_ok!(buf.provide_buffer(6));
+                let s2 = s2.as_mut();
+                assert_eq!(s2.len(), 6);
+
+                s2.copy_from_slice(&[5, 6, 7, 8, 9, 10]);
+                assert_eq!(buf.remaining_len(), 0);
+
+                assert_eq!(s1, [1, 2, 3, 4]);
+                assert_eq!(s2, [5, 6, 7, 8, 9, 10]);
+
+                let err = assert_err!(buf.provide_buffer(1));
+                assert_eq!(err, InsufficientSpace);
+            }
+
+            assert_eq!(backing, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        }
+
+        #[test]
+        fn reset_allows_reuse() {
+            let mut backing = [0; 6];
+            let mut counter = AtomicUsize::new(0);
+
+            {
+                let mut buf = ArcBumpBuffer::new(&mut backing, &mut counter);
+
+                let s1 = {
+                    let mut s1 = assert_ok!(buf.provide_buffer(3));
+                    let s1 = s1.as_mut();
+                    s1.copy_from_slice(&[11, 12, 13]);
+
+                    s1.as_ptr()
+                };
+
+                let mut s2 = assert_ok!(buf.provide_buffer(3));
+                let s2 = s2.as_mut();
 
                 assert_eq!(s1, s2.as_ptr());
             }
