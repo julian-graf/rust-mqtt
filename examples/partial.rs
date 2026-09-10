@@ -55,8 +55,8 @@ async fn main() {
             info!("{:?}", client.shared_config());
             info!("{:?}", client.session());
         }
-        Err(e) => {
-            error!("Failed to connect to server: {e:?}");
+        Err(_) => {
+            error!("Failed to connect to server");
             return;
         }
     }
@@ -66,7 +66,7 @@ async fn main() {
         client.buffer_mut().reset();
     }
 
-    let topic_string = MqttString::from_str("rust-mqtt/is/great").unwrap();
+    let topic_string = MqttString::<&[u8]>::from_str("rust-mqtt/is/great").unwrap();
     let topic_filter = TopicFilter::new(topic_string.as_borrowed()).unwrap();
     let topic_name = TopicName::new(topic_string.as_borrowed()).unwrap();
 
@@ -75,8 +75,8 @@ async fn main() {
         .await
     {
         Ok(_) => info!("Sent Subscribe"),
-        Err(e) => {
-            error!("Failed to subscribe: {e:?}");
+        Err(_) => {
+            error!("Failed to subscribe");
             return;
         }
     }
@@ -90,12 +90,12 @@ async fn main() {
         })) => {
             info!("Subscribed with reason code {reason_code:?}");
         }
-        Ok(e) => {
-            error!("Expected Suback but received event {e:?}");
+        Ok(_) => {
+            error!("Expected Suback but received event");
             return;
         }
-        Err(e) => {
-            error!("Failed to receive Suback {e:?}");
+        Err(_) => {
+            error!("Failed to receive Suback");
             return;
         }
     }
@@ -150,8 +150,8 @@ async fn main() {
         Ok(_) => {
             info!("Published message");
         }
-        Err(e) => {
-            error!("Failed to send Publish {e:?}");
+        Err(_) => {
+            error!("Failed to send Publish");
             return;
         }
     };
@@ -162,8 +162,8 @@ async fn main() {
                 break header;
             }
             Ok(e) => info!("Received unexpected Event {e:?}"),
-            Err(e) => {
-                error!("Failed to poll: {e:?}");
+            Err(_) => {
+                error!("Failed to poll");
                 return;
             }
         }
@@ -171,8 +171,8 @@ async fn main() {
 
     let (e, mut reader) = match client.poll_publish_payload(header).await {
         Ok(e) => e,
-        Err(e) => {
-            error!("Failed to poll: {e:?}");
+        Err(_) => {
+            error!("Failed to poll");
             return;
         }
     };
@@ -212,8 +212,8 @@ async fn main() {
 
             info!("Disconnected from server")
         }
-        Err(e) => {
-            error!("Failed to disconnect from server: {e:?}");
+        Err(_) => {
+            error!("Failed to disconnect from server");
         }
     }
 }

@@ -276,8 +276,12 @@ impl<S: AsRef<[u8]>, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_P
     }
 }
 
-impl<'p, S: AsRef<[u8]>, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
-    PublishPacket<'p, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+impl<
+    'p,
+    S: AsRef<[u8]>,
+    const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+> PublishPacket<'p, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
 {
     /// Creates a new packet with Quality of Service 0
     #[allow(clippy::too_many_arguments)]
@@ -396,10 +400,10 @@ pub mod partial {
         },
     };
 
-    #[derive(Debug, Clone)]
-    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Clone)]
     pub struct PayloadlessPublishPacket<
         'p,
+        S,
         const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
         const MAX_USER_PROPERTIES: usize,
     > {
@@ -407,32 +411,42 @@ pub mod partial {
         pub identified_qos: IdentifiedQoS,
         pub retain: bool,
 
-        pub topic: TopicReference<'p>,
+        pub topic: TopicReference<'p, S>,
 
         // TODO clarify whether PayloadFormatIndicator can be included only once
         pub payload_format_indicator: Option<PayloadFormatIndicator>,
 
         // TODO clarify whether MessageExpiryInterval can be included only once
         pub message_expiry_interval: Option<MessageExpiryInterval>,
-        pub response_topic: Option<ResponseTopic<'p>>,
-        pub correlation_data: Option<CorrelationData<'p>>,
-        pub user_properties: Vec<UserProperty<'p>, MAX_USER_PROPERTIES>,
+        pub response_topic: Option<ResponseTopic<'p, S>>,
+        pub correlation_data: Option<CorrelationData<'p, S>>,
+        pub user_properties: Vec<UserProperty<'p, S>, MAX_USER_PROPERTIES>,
         pub subscription_identifiers: Vec<SubscriptionIdentifier, MAX_SUBSCRIPTION_IDENTIFIERS>,
-        pub content_type: Option<ContentType<'p>>,
+        pub content_type: Option<ContentType<'p, S>>,
         pub message_len: usize,
     }
 
-    impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> Packet
-        for PayloadlessPublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+    impl<'p, S, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> Packet
+        for PayloadlessPublishPacket<'p, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
     {
         const PACKET_TYPE: PacketType = PacketType::Publish;
     }
 
-    impl<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
-        RxPacket<'p>
-        for PayloadlessPublishPacket<'p, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>
+    impl<
+        'p,
+        R: Read,
+        B: BufferProvider<'p>,
+        const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+        const MAX_USER_PROPERTIES: usize,
+    > RxPacket<'p, R, B>
+        for PayloadlessPublishPacket<
+            'p,
+            B::Buffer,
+            MAX_SUBSCRIPTION_IDENTIFIERS,
+            MAX_USER_PROPERTIES,
+        >
     {
-        async fn receive<R: Read, B: BufferProvider<'p>>(
+        async fn receive(
             header: &FixedHeader,
             mut reader: BodyReader<'_, 'p, R, B>,
         ) -> Result<Self, RxError<R::Error, B::ProvisionError>> {
@@ -475,11 +489,11 @@ pub mod partial {
             let mut payload_format_indicator: Option<PayloadFormatIndicator> = None;
             let mut message_expiry_interval: Option<MessageExpiryInterval> = None;
             let mut topic_alias: Option<TopicAlias> = None;
-            let mut response_topic: Option<ResponseTopic<'_>> = None;
-            let mut correlation_data: Option<CorrelationData<'_>> = None;
+            let mut response_topic: Option<ResponseTopic<'_, _>> = None;
+            let mut correlation_data: Option<CorrelationData<'_, _>> = None;
             let mut user_properties = Vec::new();
             let mut subscription_identifiers = Vec::new();
-            let mut content_type: Option<ContentType<'_>> = None;
+            let mut content_type: Option<ContentType<'_, _>> = None;
 
             while properties_length > 0 {
                 verbose!(
@@ -542,7 +556,7 @@ pub mod partial {
                         unsafe { user_properties.push_unchecked(user_property) };
                     }
                     PropertyType::UserProperty => {
-                        let len = UserProperty::skip(r).await?;
+                        let len = UserProperty::<&[u8]>::skip(r).await?;
                         properties_length = properties_length
                             .checked_sub(len)
                             .ok_or(RxError::MalformedPacket)?;

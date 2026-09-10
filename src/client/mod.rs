@@ -173,8 +173,9 @@ pub struct Client<
 
     raw: Raw<'c, N, B>,
 
-    manual_ack_when:
-        &'c dyn Fn(&Publish<'_, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>) -> bool,
+    manual_ack_when: &'c dyn Fn(
+        &Publish<'_, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+    ) -> bool,
     reauth_state: ReAuthState,
 }
 
@@ -2262,7 +2263,7 @@ impl<
         header: FixedHeader,
     ) -> Result<
         (
-            PartialPublishEvent<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+            PartialPublishEvent<'c, B::Buffer, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
             ApplicationMessageReader<
                 'a,
                 'c,
@@ -2276,13 +2277,16 @@ impl<
                 MAX_USER_PROPERTIES,
             >,
         ),
-        MqttError<'c, 0>,
+        MqttError<'c, B::Buffer, 0>,
     > {
-        assert_eq!(header.packet_type(), Ok(PublishPacket::<0, 0>::PACKET_TYPE));
+        assert_eq!(
+            header.packet_type(),
+            Ok(PublishPacket::<&[u8], 0, 0>::PACKET_TYPE)
+        );
 
         let publish = self
             .raw
-            .recv_body::<PayloadlessPublishPacket<MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>>(&header)
+            .recv_body::<PayloadlessPublishPacket<_, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>>(&header)
             .await?;
 
         // Our topic alias maximum is always 0, the moment we receive a topic alias, this is an error.

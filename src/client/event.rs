@@ -218,8 +218,12 @@ pub struct Suback<'s, S, const MAX_USER_PROPERTIES: usize> {
 
 /// Content of [`Event::Publish`] or [`Event::Duplicate`]. In the latter case, it is **NOT** a valid
 /// application message and **MUST** be treated like it wasn't ever delivered by the client.
-pub struct Publish<'p, S, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize>
-{
+pub struct Publish<
+    'p,
+    S,
+    const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+> {
     /// The acknowledgement mode the client has determined with its given predicate to use for this
     /// publication flow. If this is the content of an [`Event::Duplicate`], this value is not the
     /// one determined for this PUBLISH packet through the predicate but the value of the original
@@ -339,7 +343,8 @@ pub struct Pubrej<'p, S, const MAX_USER_PROPERTIES: usize> {
 }
 
 impl<'p, T, S, const MAX_USER_PROPERTIES: usize>
-    From<GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>> for Pubrej<'p, S, MAX_USER_PROPERTIES>
+    From<GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>>
+    for Pubrej<'p, S, MAX_USER_PROPERTIES>
 {
     fn from(packet: GenericPubackPacket<'p, T, S, MAX_USER_PROPERTIES>) -> Self {
         debug_assert!(packet.reason_code.is_erroneous());
@@ -383,10 +388,9 @@ mod partial {
     };
 
     /// Events emitted by the client when receiving a partial PUBLISH packet.
-    #[derive(Debug)]
-    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
     pub enum PartialPublishEvent<
         'e,
+        S,
         const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
         const MAX_USER_PROPERTIES: usize,
     > {
@@ -408,7 +412,7 @@ mod partial {
         /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
         /// [`Client::manual_acknowledge`]: crate::client::Client::manual_acknowledge
         /// [`Client::manual_receive`]: crate::client::Client::manual_receive
-        Publish(PartialPublish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+        Publish(PartialPublish<'e, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
 
         /// The server sent a [`QoS::ExactlyOnce`] PUBLISH packet which would cause a duplicate.
         /// The [`AckMode`] of the original PUBLISH packet for this packet identifier is unchanged,
@@ -429,16 +433,15 @@ mod partial {
         ///
         /// [`QoS::ExactlyOnce`]: crate::types::QoS::ExactlyOnce
         /// [`Client::ack_manually_when`]: crate::client::Client::ack_manually_when
-        Duplicate(PartialPublish<'e, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
+        Duplicate(PartialPublish<'e, S, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>),
     }
 
     /// Content of [`PartialPublishEvent::Publish`] or [`PartialPublishEvent::Duplicate`]. In the latter
     /// case, it is **NOT** a valid application message and **MUST** be treated like it wasn't ever delivered
     /// by the client.
-    #[derive(Debug)]
-    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
     pub struct PartialPublish<
         'p,
+        S,
         const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
         const MAX_USER_PROPERTIES: usize,
     > {
@@ -460,7 +463,7 @@ mod partial {
         pub retain: bool,
 
         /// The exact topic of this publication.
-        pub topic: TopicName<'p>,
+        pub topic: TopicName<'p, S>,
 
         /// If present, indicates whether the payload is UTF-8. This value is set by the publisher and is
         /// NOT verified by the client library.
@@ -474,22 +477,22 @@ mod partial {
 
         /// Identifies an incoming publication as a request and specifies the topic which the response should
         /// be published on.
-        pub response_topic: Option<TopicName<'p>>,
+        pub response_topic: Option<TopicName<'p, S>>,
 
         /// Present in incoming requests and responses. In either case this is arbitrary binary data used for
         /// associating either the following response with this specific request or in case of a response,
         /// link back to the original request.
-        pub correlation_data: Option<MqttBinary<'p>>,
+        pub correlation_data: Option<MqttBinary<'p, S>>,
 
         /// The user property entries in the PUBLISH packet. If the vector is full, this list might not be
         /// exhaustive.
-        pub user_properties: Vec<MqttStringPair<'p>, MAX_USER_PROPERTIES>,
+        pub user_properties: Vec<MqttStringPair<'p, S>, MAX_USER_PROPERTIES>,
 
         /// The subscription identifiers in the PUBLISH packet. If the vector is full, this list might not
         /// be exhaustive.
         pub subscription_identifiers: Vec<VarByteInt, MAX_SUBSCRIPTION_IDENTIFIERS>,
 
         /// The content type property of the PUBLISH packet
-        pub content_type: Option<MqttString<'p>>,
+        pub content_type: Option<MqttString<'p, S>>,
     }
 }
