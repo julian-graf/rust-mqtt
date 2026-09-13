@@ -51,7 +51,12 @@ pub struct Connected<'i, const MAX_USER_PROPERTIES: usize> {
 /// Events emitted by the client when receiving an MQTT packet.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PROPERTIES: usize> {
+pub enum Event<
+    'e,
+    const MAX_SUBSCRIPTION_IDENTIFIERS: usize,
+    const MAX_USER_PROPERTIES: usize,
+    const MAX_PARALLEL_SUBS: usize,
+> {
     /// The server sent a PINGRESP packet.
     Pingresp,
 
@@ -81,13 +86,13 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
     ///
     /// The subscription process is complete and was successful if the [`ReasonCode`] indicates
     /// success. The SUBSCRIBE packet won't have to be resent.
-    Suback(Suback<'e, MAX_USER_PROPERTIES>),
+    Suback(Suback<'e, MAX_USER_PROPERTIES, MAX_PARALLEL_SUBS>),
 
     /// The server sent an UNSUBACK packet matching an UNSUBSCRIBE packet.
     ///
     /// The unsubscription process is complete and was successful if the [`ReasonCode`]
     /// indicates success. The UNSUBSCRIBE packet won't have to be resent.
-    Unsuback(Suback<'e, MAX_USER_PROPERTIES>),
+    Unsuback(Suback<'e, MAX_USER_PROPERTIES, MAX_PARALLEL_SUBS>),
 
     /// The server sent a PUBACK, PUBREC or PUBCOMP with an erroneous [`ReasonCode`],
     /// therefore rejecting the publication. The publication process is aborted, the client
@@ -212,7 +217,7 @@ pub enum Event<'e, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER_PRO
 /// Content of [`Event::Suback`].
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Suback<'s, const MAX_USER_PROPERTIES: usize> {
+pub struct Suback<'s, const MAX_USER_PROPERTIES: usize, const MAX_PARALLEL_SUBS: usize> {
     /// Packet identifier of the acknowledged SUBSCRIBE packet.
     pub packet_identifier: PacketIdentifier,
 
@@ -224,6 +229,8 @@ pub struct Suback<'s, const MAX_USER_PROPERTIES: usize> {
 
     /// Reason code returned for the subscription.
     pub reason_code: ReasonCode,
+
+    pub reason_codes: Vec<ReasonCode, MAX_PARALLEL_SUBS>,
 }
 
 /// Content of [`Event::Publish`] or [`Event::Duplicate`]. In the latter case, it is **NOT** a valid

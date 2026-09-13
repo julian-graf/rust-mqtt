@@ -41,6 +41,7 @@ pub mod options;
 pub mod raw;
 
 pub use err::Error as MqttError;
+use heapless::Vec;
 pub use raw::AbortError;
 
 /// An MQTT client.
@@ -167,6 +168,7 @@ pub struct Client<
     const MAX_USER_PROPERTIES: usize,
     const MAX_INCOMING_TOPIC_ALIASES: usize,
     const MAX_OUTGOING_TOPIC_ALIASES: usize,
+    const MAX_MULTI_SUBSCRIPTIONS: usize,
 > {
     client_config: ClientConfig<'a>,
     shared_config: SharedConfig,
@@ -197,6 +199,7 @@ impl<
     const MAX_USER_PROPERTIES: usize,
     const MAX_INCOMING_TOPIC_ALIASES: usize,
     const MAX_OUTGOING_TOPIC_ALIASES: usize,
+    const MAX_MULTI_SUBSCRIPTIONS: usize,
 > core::fmt::Debug
     for Client<
         '_,
@@ -210,6 +213,7 @@ impl<
         MAX_USER_PROPERTIES,
         MAX_INCOMING_TOPIC_ALIASES,
         MAX_OUTGOING_TOPIC_ALIASES,
+        MAX_MULTI_SUBSCRIPTIONS,
     >
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -236,6 +240,7 @@ impl<
     const MAX_USER_PROPERTIES: usize,
     const MAX_INCOMING_TOPIC_ALIASES: usize,
     const MAX_OUTGOING_TOPIC_ALIASES: usize,
+    const MAX_MULTI_SUBSCRIPTIONS: usize,
 > defmt::Format
     for Client<
         '_,
@@ -249,6 +254,7 @@ impl<
         MAX_USER_PROPERTIES,
         MAX_INCOMING_TOPIC_ALIASES,
         MAX_OUTGOING_TOPIC_ALIASES,
+        MAX_MULTI_SUBSCRIPTIONS,
     >
 {
     fn format(&self, fmt: defmt::Formatter) {
@@ -277,6 +283,7 @@ impl<
     const MAX_USER_PROPERTIES: usize,
     const MAX_INCOMING_TOPIC_ALIASES: usize,
     const MAX_OUTGOING_TOPIC_ALIASES: usize,
+    const MAX_MULTI_SUBSCRIPTIONS: usize,
 >
     Client<
         'a,
@@ -290,6 +297,7 @@ impl<
         MAX_USER_PROPERTIES,
         MAX_INCOMING_TOPIC_ALIASES,
         MAX_OUTGOING_TOPIC_ALIASES,
+        MAX_MULTI_SUBSCRIPTIONS,
     >
 {
     /// Creates a new, disconnected MQTT client using a buffer provider to store
@@ -324,6 +332,7 @@ impl<
                 MAX_OUTGOING_TOPIC_ALIASES <= 65535,
                 "MAX_OUTGOING_TOPIC_ALIASES must be less than or equal to 65535"
             );
+            const_assert!(MAX_MULTI_SUBSCRIPTIONS < 0, "TODO")
         }
 
         Self {
@@ -2286,7 +2295,7 @@ impl<
     pub async fn poll(
         &mut self,
     ) -> Result<
-        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES, MAX_MULTI_SUBSCRIPTIONS>,
         MqttError<'c, MAX_USER_PROPERTIES>,
     > {
         let header = self.poll_header().await.map_err(MqttError::inflate)?;
@@ -2367,7 +2376,7 @@ impl<
         &mut self,
         header: FixedHeader,
     ) -> Result<
-        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES>,
+        Event<'c, MAX_SUBSCRIPTION_IDENTIFIERS, MAX_USER_PROPERTIES, MAX_MULTI_SUBSCRIPTIONS>,
         MqttError<'c, MAX_USER_PROPERTIES>,
     > {
         let event = match header.packet_type()? {
@@ -2415,6 +2424,7 @@ impl<
                             .map(Property::into_inner)
                             .collect(),
                         reason_code: *r,
+                        reason_codes: Vec::new(),
                     })
                 } else {
                     debug!("packet identifier {} in SUBACK not in use", pid);
@@ -2461,6 +2471,7 @@ impl<
                             .map(Property::into_inner)
                             .collect(),
                         reason_code: *r,
+                        reason_codes: Vec::new(),
                     })
                 } else {
                     debug!("packet identifier {} in UNSUBACK not in use", pid);
