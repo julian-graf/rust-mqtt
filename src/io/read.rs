@@ -90,7 +90,8 @@ impl<R: Read> Readable<R> for VarByteInt {
 
                 // Invariant: We checked that the slice is within the valid length range and
                 // that the last byte matches the end condition of the variable byte integer encoding
-                break Ok(VarByteInt::from_slice_unchecked(slice));
+
+                break Self::from_encoded_slice(slice).ok_or(ReadError::ProtocolError);
             }
         }
     }

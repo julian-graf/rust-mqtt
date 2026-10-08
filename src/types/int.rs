@@ -64,12 +64,14 @@ impl VarByteInt {
         self.0 as usize
     }
 
-    /// Decodes a variable byte integer from a slice.
+    /// Decodes a variable byte integer from a slice. Checks that the
+    /// slice is the minimal encoding.
     ///
     /// # Invariants
+    ///
     /// The slice must contain a correctly encoded variable byte integer and
     /// have exactly the length of that encoding.
-    pub(crate) fn from_slice_unchecked(slice: &[u8]) -> Self {
+    pub(crate) fn from_encoded_slice(slice: &[u8]) -> Option<Self> {
         let mut multiplier = 1;
         let mut value = 0;
 
@@ -93,7 +95,15 @@ impl VarByteInt {
             }
         }
 
-        Self::new_unchecked(value)
+        let minimal_encoding = match value {
+            0..=127 => 1,
+            128..=16_383 => 2,
+            16_384..=2_097_151 => 3,
+            2_097_152..=Self::MAX_ENCODABLE => 4,
+            _ => unreachable!("Invariant, never occurs if the slice is not longer than 4 bytes"),
+        };
+
+        (slice.len() == minimal_encoding).then_some(Self::new_unchecked(value))
     }
 }
 

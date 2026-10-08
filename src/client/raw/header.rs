@@ -74,17 +74,21 @@ impl HeaderState {
                 Ok(None)
             }
         } else {
+            self.read = 0;
+
             let slice = &self.buffer[1..=i];
 
             // Invariant: We checked that the slice is within the valid length range and
             // that the last byte matches the end condition of the variable byte integer encoding
-            let remaining_len = VarByteInt::from_slice_unchecked(slice);
 
-            self.read = 0;
-            Ok(Some(FixedHeader {
-                type_and_flags: self.buffer[0],
-                remaining_len,
-            }))
+            VarByteInt::from_encoded_slice(slice)
+                .ok_or(ReadError::MalformedPacket)
+                .map(|remaining_len| {
+                    Some(FixedHeader {
+                        type_and_flags: self.buffer[0],
+                        remaining_len,
+                    })
+                })
         }
     }
 }
