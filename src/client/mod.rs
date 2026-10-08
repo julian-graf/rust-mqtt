@@ -1297,10 +1297,9 @@ impl<
         );
 
         if let Some(alias) = options.topic.alias() {
-            assert!(
-                usize::from(alias.get()) <= MAX_OUTGOING_TOPIC_ALIASES,
-                "attempted to publish to a topic alias greater than the client's maximum"
-            );
+            if usize::from(alias.get()) > MAX_OUTGOING_TOPIC_ALIASES {
+                return Err(MqttError::UnsupportedByServer);
+            }
         }
 
         if (matches!(options.qos, QoS::AtMostOnce | QoS::AtLeastOnce)
