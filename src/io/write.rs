@@ -4,7 +4,10 @@ use crate::{
     eio::Write,
     fmt::unreachable,
     io::err::WriteError,
-    types::{MqttBinary, MqttString, MqttStringPair, TopicFilter, TopicName, VarByteInt},
+    types::{
+        MqttBinary, MqttString, MqttStringPair, NonZeroVarByteInt, TopicFilter, TopicName,
+        VarByteInt,
+    },
 };
 
 pub trait Writable {
@@ -112,6 +115,15 @@ impl Writable for VarByteInt {
                 return Ok(());
             }
         }
+    }
+}
+impl Writable for NonZeroVarByteInt {
+    fn written_len(&self) -> usize {
+        VarByteInt::from(*self).written_len()
+    }
+
+    async fn write<W: Write>(&self, write: &mut W) -> Result<(), WriteError<W::Error>> {
+        VarByteInt::from(*self).write(write).await
     }
 }
 impl Writable for MqttBinary<'_> {

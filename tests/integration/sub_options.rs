@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{num::NonZero, time::Duration};
 
 use rust_mqtt::{
     client::{
@@ -8,7 +8,7 @@ use rust_mqtt::{
             UnsubscriptionOptions,
         },
     },
-    types::{MqttString, MqttStringPair, VarByteInt},
+    types::{MqttString, MqttStringPair, NonZeroVarByteInt},
 };
 use tokio::time::{sleep, timeout};
 use tokio_test::assert_err;
@@ -301,7 +301,7 @@ async fn subscription_identifier() {
 
     let options = DEFAULT_QOS0_SUB_OPTIONS
         .at_least_once()
-        .subscription_identifier(VarByteInt::from(83u16));
+        .subscription_identifier(NonZeroVarByteInt::from(NonZero::new(83u16).unwrap()));
     assert_subscribe!(rx, &options, topic_filter.clone());
 
     let pub_options = PublicationOptions::new(TopicReference::Name(topic_name.clone()))
@@ -315,7 +315,7 @@ async fn subscription_identifier() {
     assert_eq!(publish.subscription_identifiers.len(), 1);
     assert_eq!(
         publish.subscription_identifiers.first().unwrap(),
-        &VarByteInt::from(83u16)
+        &NonZeroVarByteInt::from(NonZero::new(83u16).unwrap())
     );
 
     disconnect(&mut tx, DEFAULT_DC_OPTIONS).await;

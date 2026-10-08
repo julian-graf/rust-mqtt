@@ -136,8 +136,8 @@ mod unit {
         client::options::{RetainHandling, SubscriptionOptions},
         test::tx::encode,
         types::{
-            MqttString, MqttStringPair, PacketIdentifier, SubscriptionFilter, TopicFilter,
-            VarByteInt,
+            MqttString, MqttStringPair, NonZeroVarByteInt, PacketIdentifier, SubscriptionFilter,
+            TopicFilter,
         },
         v5::{
             packet::SubscribePacket,
@@ -216,7 +216,7 @@ mod unit {
             &SubscriptionOptions::new()
                 .retain_handling(RetainHandling::SendIfNotSubscribedBefore)
                 .retain_as_published()
-                .subscription_identifier(VarByteInt::from(23459u16)),
+                .subscription_identifier(NonZeroVarByteInt::from(NonZero::new(23459u16).unwrap())),
         )
         .unwrap()];
 
@@ -234,7 +234,7 @@ mod unit {
         let packet: SubscribePacket<'_, 10, 16> = SubscribePacket::new(
             PacketIdentifier::new(NonZero::new(23197).unwrap()),
             Some(SubscriptionIdentifier(
-                VarByteInt::new(87986078u32).unwrap(),
+                NonZeroVarByteInt::new(NonZero::new(87986078u32).unwrap()).unwrap(),
             )),
             user_properties.into(),
             topics.into(),

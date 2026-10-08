@@ -6,7 +6,7 @@ use crate::{
     eio::{ErrorType, Read},
     fmt::{unreachable, verbose},
     io::err::{BodyReadError, ReadError},
-    types::{MqttBinary, MqttString, MqttStringPair, TopicName, VarByteInt},
+    types::{MqttBinary, MqttString, MqttStringPair, NonZeroVarByteInt, TopicName, VarByteInt},
 };
 
 pub trait Readable<R: Read>: Sized {
@@ -94,6 +94,12 @@ impl<R: Read> Readable<R> for VarByteInt {
                 break Self::from_encoded_slice(slice).ok_or(ReadError::ProtocolError);
             }
         }
+    }
+}
+impl<R: Read> Readable<R> for NonZeroVarByteInt {
+    async fn read(read: &mut R) -> Result<Self, ReadError<R::Error>> {
+        NonZeroVarByteInt::try_from(VarByteInt::read(read).await?)
+            .map_err(|_| ReadError::ProtocolError)
     }
 }
 impl<'b, R: Read + Store<'b>> Readable<R> for MqttBinary<'b> {

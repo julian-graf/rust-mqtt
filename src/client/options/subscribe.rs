@@ -1,4 +1,4 @@
-use crate::types::{MqttStringPair, QoS, VarByteInt};
+use crate::types::{MqttStringPair, NonZeroVarByteInt, QoS};
 
 /// Options for subscription included for every topic.
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +34,7 @@ pub struct Options<'s> {
     /// but prevent the protocol error and return an error.
     ///
     /// [`Client::server_config`]: crate::client::Client::server_config
-    pub subscription_identifier: Option<VarByteInt>,
+    pub subscription_identifier: Option<NonZeroVarByteInt>,
 
     /// Arbitrary key-value pairs of strings sent as the user property entries of the
     /// SUBSCRIBE packet. Note that this slice's length must be less than [`Client`]'s
@@ -103,7 +103,10 @@ impl<'s> Options<'s> {
     ///
     /// Note that this is only allowed if the server supports subscription identifiers.
     #[must_use]
-    pub const fn subscription_identifier(mut self, subscription_identifier: VarByteInt) -> Self {
+    pub const fn subscription_identifier(
+        mut self,
+        subscription_identifier: NonZeroVarByteInt,
+    ) -> Self {
         self.subscription_identifier = Some(subscription_identifier);
         self
     }

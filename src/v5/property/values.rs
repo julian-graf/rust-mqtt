@@ -11,7 +11,7 @@ use crate::{
         write::{Writable, wlen},
     },
     packet::RxError,
-    types::{MqttBinary, MqttString, MqttStringPair, QoS, TopicName, VarByteInt},
+    types::{MqttBinary, MqttString, MqttStringPair, NonZeroVarByteInt, QoS, TopicName},
     v5::property::{Property, PropertyType},
 };
 
@@ -106,7 +106,7 @@ property!(MessageExpiryInterval, u32);
 property!(ContentType<'c>, MqttString<'c>);
 property!(ResponseTopic<'c>, TopicName<'c>);
 property!(CorrelationData<'c>, MqttBinary<'c>);
-property!(SubscriptionIdentifier, VarByteInt);
+property!(SubscriptionIdentifier, NonZeroVarByteInt);
 property!(AssignedClientIdentifier<'c>, MqttString<'c>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

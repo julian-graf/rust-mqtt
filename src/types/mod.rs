@@ -13,7 +13,7 @@ pub(crate) use topic::{NoLocalSharedSubscription, SubscriptionFilter};
 pub(crate) use will::Will;
 
 pub use binary::MqttBinary;
-pub use int::VarByteInt;
+pub use int::{NonZeroVarByteInt, VarByteInt};
 pub use pid::PacketIdentifier;
 pub use qos::{IdentifiedQoS, QoS};
 pub use reason_code::ReasonCode;

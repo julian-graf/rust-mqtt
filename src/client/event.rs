@@ -6,8 +6,8 @@ use crate::{
     bytes::Bytes,
     client::{AckMode, options::TopicReference},
     types::{
-        IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, PacketIdentifier, ReasonCode,
-        TopicName, VarByteInt,
+        IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, NonZeroVarByteInt, PacketIdentifier,
+        ReasonCode, TopicName,
     },
     v5::{packet::GenericPubackPacket, property::Property},
 };
@@ -286,7 +286,7 @@ pub struct Publish<'p, const MAX_SUBSCRIPTION_IDENTIFIERS: usize, const MAX_USER
 
     /// The subscription identifiers in the PUBLISH packet. If the vector is full, this list might not
     /// be exhaustive.
-    pub subscription_identifiers: Vec<VarByteInt, MAX_SUBSCRIPTION_IDENTIFIERS>,
+    pub subscription_identifiers: Vec<NonZeroVarByteInt, MAX_SUBSCRIPTION_IDENTIFIERS>,
 
     /// The content type property of the PUBLISH packet
     pub content_type: Option<MqttString<'p>>,

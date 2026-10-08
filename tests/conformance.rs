@@ -26,7 +26,7 @@ use rust_mqtt::{
         },
     },
     config::{KeepAlive, SessionExpiryInterval},
-    types::{MqttBinary, MqttString, TopicFilter, TopicName, VarByteInt},
+    types::{MqttBinary, MqttString, NonZeroVarByteInt, TopicFilter, TopicName},
 };
 use std::convert::Infallible;
 use tokio::{
@@ -626,22 +626,6 @@ async fn mqtt_3_8_3_4_no_local_on_shared_subscription_rejected() {
 }
 
 #[tokio::test]
-async fn section_3_8_2_1_2_subscription_identifier_zero_rejected() {
-    let mut broker = Broker::bind().await.unwrap();
-    let mut client = connect(&mut broker).await.unwrap();
-    let options = SubscriptionOptions::new().subscription_identifier(VarByteInt::from(0u8));
-    let result = client.subscribe(topic_filter("a"), &options).await;
-    assert!(result.is_err());
-    assert!(
-        broker
-            .expect_silence(Duration::from_millis(20))
-            .await
-            .is_ok()
-    );
-    drop(client);
-}
-
-#[tokio::test]
 async fn section_3_2_2_3_11_wildcard_subscription_unavailable_honoured() {
     let mut broker = Broker::bind().await.unwrap();
     let mut client = connect_with_connack(&mut broker, &[0x00, 0x00, 0x02, 0x28, 0x00])
@@ -689,7 +673,8 @@ async fn section_3_2_2_3_12_subscription_identifier_unavailable_honoured() {
     let mut client = connect_with_connack(&mut broker, &[0x00, 0x00, 0x02, 0x29, 0x00])
         .await
         .unwrap();
-    let options = SubscriptionOptions::new().subscription_identifier(VarByteInt::from(7u8));
+    let options = SubscriptionOptions::new()
+        .subscription_identifier(NonZeroVarByteInt::from(NonZero::new(7u8).unwrap()));
     assert!(client.subscribe(topic_filter("a"), &options).await.is_err());
     assert!(
         broker

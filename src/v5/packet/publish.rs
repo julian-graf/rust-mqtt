@@ -379,8 +379,8 @@ mod unit {
         client::options::TopicReference,
         test::{rx::decode, tx::encode},
         types::{
-            IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, PacketIdentifier, TopicName,
-            VarByteInt,
+            IdentifiedQoS, MqttBinary, MqttString, MqttStringPair, NonZeroVarByteInt,
+            PacketIdentifier, TopicName,
         },
         v5::{
             packet::PublishPacket,
@@ -670,7 +670,7 @@ mod unit {
 
         assert_eq!(
             packet.subscription_identifiers.as_slice(),
-            &[VarByteInt::from(42u8).into()]
+            &[NonZeroVarByteInt::from(NonZero::new(42u8).unwrap()).into()]
         );
 
         assert_eq!(
@@ -710,8 +710,10 @@ mod unit {
         assert_eq!(
             packet.subscription_identifiers.as_slice(),
             &[
-                VarByteInt::try_from(10_000_000u32).unwrap().into(),
-                VarByteInt::from(500u16).into()
+                NonZeroVarByteInt::try_from(NonZero::new(10_000_000u32).unwrap())
+                    .unwrap()
+                    .into(),
+                NonZeroVarByteInt::from(NonZero::new(500u16).unwrap()).into()
             ]
         );
         assert_eq!(packet.message, Bytes::from("OK".as_bytes()));

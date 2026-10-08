@@ -1,3 +1,5 @@
+use core::num::{NonZero, TryFromIntError};
+
 use crate::{
     fmt::{const_debug_assert, debug_assert, debug_assert_eq},
     types::TooLargeToEncode,
@@ -122,5 +124,93 @@ impl From<u16> for VarByteInt {
 impl From<u8> for VarByteInt {
     fn from(value: u8) -> Self {
         Self(u32::from(value))
+    }
+}
+impl From<NonZeroVarByteInt> for VarByteInt {
+    fn from(value: NonZeroVarByteInt) -> Self {
+        Self::new_unchecked(value.value().get())
+    }
+}
+
+/// MQTT's variable byte integer encoding. The value has to be less than or equal to
+/// [`VarByteInt::MAX_ENCODABLE`] (`268_435_455`). Exceeding this ultimately leads to
+/// panics or malformed packets.
+///
+/// Used for packet length and some properties.
+///
+/// Use its [`TryFrom`] ([`u32`]) and [`From`] ([`u16`], [`u8`]) implementations to
+/// construct a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct NonZeroVarByteInt(NonZero<u32>);
+
+impl NonZeroVarByteInt {
+    /// Creates a variable byte integer by checking for the maximum value of
+    /// [`VarByteInt::MAX_ENCODABLE`].
+    /// For a version accepting `NonZero<u16>` and `NonZero<u8>`, use [`From::from`].
+    #[must_use]
+    pub const fn new(value: NonZero<u32>) -> Option<Self> {
+        if value.get() > VarByteInt::MAX_ENCODABLE {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    /// Creates a variable byte integer without checking for the maximum value of
+    /// [`VarByteInt::MAX_ENCODABLE`].
+    /// For a fallible version, use [`VarByteInt::new`].
+    /// For an infallible version accepting [`u16`] and [`u8`], use [`From::from`].
+    ///
+    /// # Invariants
+    /// The value parameter must be less than or equal to [`VarByteInt::MAX_ENCODABLE`].
+    ///
+    /// # Panics
+    /// Panics in debug builds if `value` exceeds [`VarByteInt::MAX_ENCODABLE`].
+    #[must_use]
+    pub const fn new_unchecked(value: NonZero<u32>) -> Self {
+        const_debug_assert!(
+            value.get() <= VarByteInt::MAX_ENCODABLE,
+            "the value exceeds MAX_ENCODABLE"
+        );
+
+        Self(value)
+    }
+
+    /// Returns the inner value.
+    #[must_use]
+    pub const fn value(&self) -> NonZero<u32> {
+        self.0
+    }
+
+    /// Returns [`Self::value`] as `NonZero<usize>`.
+    #[must_use]
+    pub const fn size(&self) -> NonZero<usize> {
+        NonZero::new(self.0.get() as usize).unwrap()
+    }
+}
+
+impl TryFrom<NonZero<u32>> for NonZeroVarByteInt {
+    type Error = TooLargeToEncode;
+
+    fn try_from(value: NonZero<u32>) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(TooLargeToEncode)
+    }
+}
+impl From<NonZero<u16>> for NonZeroVarByteInt {
+    fn from(value: NonZero<u16>) -> Self {
+        Self(NonZero::from(value))
+    }
+}
+impl From<NonZero<u8>> for NonZeroVarByteInt {
+    fn from(value: NonZero<u8>) -> Self {
+        Self(NonZero::from(value))
+    }
+}
+impl TryFrom<VarByteInt> for NonZeroVarByteInt {
+    type Error = TryFromIntError;
+
+    fn try_from(value: VarByteInt) -> Result<Self, Self::Error> {
+        value.value().try_into().map(Self)
     }
 }
