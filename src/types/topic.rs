@@ -213,7 +213,7 @@ impl<'t> TopicFilter<'t> {
             i += 1;
         }
 
-        true
+        !checking_share_name
     }
 
     /// Returns whether the topic filter is the topic filter of a shared subscription.
@@ -531,6 +531,8 @@ mod unit {
     #[test]
     fn topic_filter_shared_invalid_share_name() {
         assert_invalid!(TopicFilter, "$share/+/");
+        assert_invalid!(TopicFilter, "$share/#/");
+        assert_invalid!(TopicFilter, "$share/+/a");
         assert_invalid!(TopicFilter, "$share/#/a");
         assert_invalid!(TopicFilter, "$share/a+a/a");
         assert_invalid!(TopicFilter, "$share/a+/a");
@@ -539,6 +541,9 @@ mod unit {
         assert_invalid!(TopicFilter, "$share/a#/a");
         assert_invalid!(TopicFilter, "$share/#a/a");
         assert_invalid!(TopicFilter, "$share///a");
+        assert_invalid!(TopicFilter, "$share//aa");
+        assert_invalid!(TopicFilter, "$share/aaa");
+        assert_invalid!(TopicFilter, "$share/aa/");
     }
 
     #[test]
