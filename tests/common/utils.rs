@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Mutex};
+use std::{boxed::Box, net::SocketAddr, sync::Mutex};
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use log::{info, warn};
@@ -28,7 +28,7 @@ use crate::common::{
 };
 
 static UNIQUE_TOPIC_COUNTER: Mutex<u64> = Mutex::new(0);
-pub static ALLOC: StaticAlloc = StaticAlloc(AllocBuffer);
+pub static ALLOC: StaticAlloc = StaticAlloc;
 
 fn unique_number() -> u64 {
     let mut counter = UNIQUE_TOPIC_COUNTER.lock().unwrap();
@@ -48,11 +48,10 @@ pub fn unique_topic() -> (TopicName<'static>, TopicFilter<'static>) {
     (n, f)
 }
 
-pub struct StaticAlloc(AllocBuffer);
+pub struct StaticAlloc;
 impl StaticAlloc {
     pub fn get(&self) -> &'static mut AllocBuffer {
-        let inner = &raw const self.0 as *mut AllocBuffer;
-        unsafe { &mut *inner }
+        Box::leak(Box::new(AllocBuffer))
     }
 }
 
